@@ -5,7 +5,7 @@
 | 項目 | 決定 | 根拠・扱い |
 |---|---|---|
 | source branch | `codex/progress-legacy9-1024x16x64-training` | 学習専用branch |
-| Vast起動 | 自動tmuxを停止し、Git cloneで`onstart.sh`を取得 | script本文をVast設定へ貼らない |
+| Vast起動 | Web UIのOn-start Scriptで自動tmuxを停止し、Git cloneで`onstart.sh`を取得 | CLIからinstanceを作らず、`onstart.sh`本文をVast設定へ貼らない |
 | checkout | branch先端の40桁SHAを`TATARA_COMMIT`で固定しdetached checkout | branch移動の影響を受けない |
 | upstream | `SH11235/tatara@da3ea68d46a5c1ac0c18c10a57fef52d02788879` | 専用commitがこのcommitを含むことを検証 |
 | rshogi | `29245a1d8e4f198aba3fc832a506649221cb2f2c` | converter tool buildを固定 |

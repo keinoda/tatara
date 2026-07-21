@@ -30,7 +30,7 @@ def load_module(name: str, path: Path):
 
 
 class RunbookTests(unittest.TestCase):
-    def test_generated_vast_command_contains_only_clone_bootstrap(self) -> None:
+    def test_generated_browser_settings_contain_only_clone_bootstrap(self) -> None:
         branch = "codex/progress-legacy9-1024x16x64-training"
         remote = subprocess.run(
             ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
@@ -40,39 +40,16 @@ class RunbookTests(unittest.TestCase):
             cwd=REPO_ROOT,
         ).stdout.split()[0]
         environment = os.environ.copy()
-        environment.update(
-            {"OFFER_ID": "123", "VOLUME_ASK_ID": "456", "TATARA_COMMIT": remote}
-        )
+        environment.update({"TATARA_COMMIT": remote})
         generated = subprocess.run(
-            [str(SCRIPT_DIR / "print-vast-create-command.sh")],
+            [str(SCRIPT_DIR / "print-vast-browser-settings.sh")],
             check=True,
             text=True,
             capture_output=True,
             cwd=REPO_ROOT,
             env=environment,
         ).stdout
-        subprocess.run(["bash", "-n"], input=generated, check=True, text=True)
-
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_vastai = Path(temporary) / "vastai"
-            fake_vastai.write_text(
-                "#!/usr/bin/env python3\n"
-                "import json, sys\n"
-                "print(json.dumps(sys.argv[1:]))\n",
-                encoding="utf-8",
-            )
-            fake_vastai.chmod(0o755)
-            fake_environment = os.environ.copy()
-            fake_environment["PATH"] = f"{temporary}:{fake_environment['PATH']}"
-            captured = subprocess.run(
-                ["bash", "-c", generated],
-                check=True,
-                text=True,
-                capture_output=True,
-                env=fake_environment,
-            )
-        args = json.loads(captured.stdout)
-        bootstrap = args[args.index("--onstart-cmd") + 1]
+        bootstrap = generated.split("On-start Script:\n", 1)[1]
         subprocess.run(["bash", "-n", "-c", bootstrap], check=True)
         self.assertLess(
             bootstrap.index("touch /root/.no_auto_tmux"), bootstrap.index("git clone")
@@ -83,8 +60,11 @@ class RunbookTests(unittest.TestCase):
         self.assertNotIn("hf download", bootstrap)
         self.assertIn(
             "ghcr.io/keinoda/shogi-lab:cuda129-trt1011@sha256:",
-            args[args.index("--image") + 1],
+            generated,
         )
+        self.assertIn(f"-p 6001:6001 -e TATARA_COMMIT={remote}", generated)
+        self.assertNotIn("vastai create instance", generated)
+        self.assertNotIn("/tmp/", generated)
 
     def test_training_command_keeps_fixed_contract(self) -> None:
         shell = f"""

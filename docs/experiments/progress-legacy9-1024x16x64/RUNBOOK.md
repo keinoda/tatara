@@ -15,23 +15,52 @@ git rev-parse origin/codex/progress-legacy9-1024x16x64-training
 ```
 
 working treeがcleanで、最後の2 SHAが一致していることを確認する。この40桁SHAを
-`TATARA_COMMIT`とする。imageはdigest付き参照を使い、volumeは1400 GB、mount先は
-`/workspace`とする。
+`TATARA_COMMIT`とする。
 
-## 1. Vast.ai作成commandを生成
+## 1. Vast.aiのWeb画面から起動
+
+Vast.aiのWeb UIで対象offerを選び、template設定を次の値にする。
+
+| Web UI項目 | 入力値 |
+|---|---|
+| Launch Mode | SSH |
+| Direct connections | ON |
+| Image | `ghcr.io/keinoda/shogi-lab:cuda129-trt1011@sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876` |
+| Container Disk | 40 GB |
+| Volume | 1400 GB |
+| Volume Mount Path | `/workspace` |
+| Docker Options | `-p 6001:6001 -e TATARA_COMMIT=<専用branch先端の40桁SHA>` |
+
+`On-start Script`欄には次だけを貼る。`<...>`は置換せず、`TATARA_COMMIT`はDocker Optionsから
+渡す。
 
 ```bash
-cd /Users/keinoda/Documents/Tatara
-OFFER_ID=<OFFER_ID> \
-VOLUME_ASK_ID=<VOLUME_ASK_ID> \
-TATARA_COMMIT=<40桁SHA> \
-  scripts/experiments/progress-legacy9-1024x16x64/print-vast-create-command.sh \
-  > /tmp/tatara-vast-create-command.sh
-bash -n /tmp/tatara-vast-create-command.sh
-less /tmp/tatara-vast-create-command.sh
+set -Eeuo pipefail
+readonly repo="https://github.com/keinoda/tatara.git"
+readonly branch="codex/progress-legacy9-1024x16x64-training"
+readonly target="/workspace/progress-legacy9-1024x16x64-training"
+: "${TATARA_COMMIT:?TATARA_COMMIT is missing from the Vast.ai environment}"
+[[ "$TATARA_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "ERROR: invalid TATARA_COMMIT" >&2; exit 1; }
+
+touch /root/.no_auto_tmux
+
+if [[ -e "$target" ]]; then
+  [[ -d "$target/.git" ]] || { echo "ERROR: clone target is not a Git checkout: $target" >&2; exit 1; }
+  actual_origin=$(git -C "$target" remote get-url origin)
+  [[ "$actual_origin" == "$repo" ]] || { echo "ERROR: unexpected origin: $actual_origin" >&2; exit 1; }
+  [[ -z "$(git -C "$target" status --porcelain)" ]] || { echo "ERROR: checkout has uncommitted changes" >&2; exit 1; }
+  [[ "$(git -C "$target" rev-parse HEAD)" == "$TATARA_COMMIT" ]] || { echo "ERROR: existing checkout is not the pinned commit" >&2; exit 1; }
+else
+  git clone --branch "$branch" --single-branch --no-checkout "$repo" "$target"
+  branch_head=$(git -C "$target" rev-parse "refs/remotes/origin/$branch")
+  [[ "$branch_head" == "$TATARA_COMMIT" ]] || { echo "ERROR: cloned branch tip is not the pinned commit" >&2; exit 1; }
+  git -C "$target" checkout --detach "$TATARA_COMMIT"
+fi
+
+exec env TATARA_COMMIT="$TATARA_COMMIT" bash "$target/onstart.sh"
 ```
 
-出力される`--onstart-cmd`は次のbootstrapだけで、`onstart.sh`本文は含まない。
+このOn-start Scriptは次のbootstrapだけで、repository側の`onstart.sh`本文は含まない。
 
 1. `/root/.no_auto_tmux`を作り、Vast.aiのlogin時自動tmuxを止める。
 2. 専用branchを`/workspace/progress-legacy9-1024x16x64-training`へcloneする。
@@ -39,14 +68,15 @@ less /tmp/tatara-vast-create-command.sh
 4. detached checkoutしたrepository内の`onstart.sh`を実行する。
 
 再起動時にclone先が既にあれば、origin・clean状態・HEADを検査し、すべて一致する場合だけ再利用する。
-`pull`、別revisionへのcheckout、既存directory削除は行わない。表示内容とoffer/volume IDを確認後、
-operatorが明示的に次を実行する。
+`pull`、別revisionへのcheckout、既存directory削除は行わない。Web UIの設定内容と選択offerを
+確認してから、Web UIのRent/Launch操作でinstanceを作成する。ローカルのVast CLIは使わない。
+
+同じ設定をterminal上で確認したい場合だけ、次を実行する。fileへ保存する必要はない。
 
 ```bash
-bash /tmp/tatara-vast-create-command.sh
+TATARA_COMMIT=<40桁SHA> \
+  scripts/experiments/progress-legacy9-1024x16x64/print-vast-browser-settings.sh
 ```
-
-この操作だけがinstanceを作成する。generator script自体はinstanceを作成しない。
 
 ## 2. onstart状態確認
 

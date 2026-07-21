@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 固定commitをGitから取得してonstart.shを実行するVast.ai作成commandを表示する。
-# このscript自身はinstanceを作成しない。
+# Vast.aiのWeb画面へ入力する固定値とOn-start Scriptを表示する。
+# 互換のためfile名は維持するが、CLI作成commandは表示・実行しない。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -8,13 +8,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 readonly TATARA_REPO="https://github.com/keinoda/tatara.git"
 readonly TATARA_BRANCH="codex/progress-legacy9-1024x16x64-training"
 readonly REMOTE_BRANCH="refs/heads/$TATARA_BRANCH"
-readonly CLONE_ROOT="/workspace/progress-legacy9-1024x16x64-training"
 
-[[ -n "${OFFER_ID:-}" ]] || fail "OFFER_IDを明示してください"
-[[ "$OFFER_ID" =~ ^[0-9]+$ ]] || fail "OFFER_IDは数字で指定してください: $OFFER_ID"
-[[ -n "${VOLUME_ASK_ID:-}" ]] || fail "VOLUME_ASK_IDを明示してください"
-[[ "$VOLUME_ASK_ID" =~ ^[0-9]+$ ]] \
-  || fail "VOLUME_ASK_IDは数字で指定してください: $VOLUME_ASK_ID"
 [[ -n "${TATARA_COMMIT:-}" ]] || fail "TATARA_COMMITを40桁SHAで明示してください"
 [[ "$TATARA_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
   || fail "TATARA_COMMITは40桁の小文字Git SHAで指定してください"
@@ -54,13 +48,24 @@ BOOTSTRAP
 readonly image_reference="$CONTAINER_IMAGE@$CONTAINER_IMAGE_DIGEST"
 readonly vast_env="-p 6001:6001 -e TATARA_COMMIT=$TATARA_COMMIT"
 
-printf 'vastai create instance %q \\\n' "$OFFER_ID"
-printf '  --image %q \\\n' "$image_reference"
-printf '  --env %q \\\n' "$vast_env"
-printf '  --onstart-cmd %q \\\n' "$bootstrap"
-printf '  --disk 40 \\\n'
-printf '  --create-volume %q \\\n' "$VOLUME_ASK_ID"
-printf '  --volume-size 1400 \\\n'
-printf '  --mount-path /workspace \\\n'
-printf '  --ssh \\\n'
-printf '  --direct\n'
+cat <<SETTINGS
+Vast.ai Web UI settings
+
+Launch mode:
+SSH / Direct connections enabled
+
+Image:
+$image_reference
+
+Container disk:
+40 GB
+
+Volume:
+1400 GB mounted at /workspace
+
+Docker Options:
+$vast_env
+
+On-start Script:
+$bootstrap
+SETTINGS
