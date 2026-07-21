@@ -7,8 +7,7 @@ use nnue_format::layerstack_weights::{LEGACY_NNUE_VERSION_BUCKETS9, NNUE_VERSION
 use nnue_format::{LayerStackWeights, YANEURAOU_LAYER_STACKS, save_yaneuraou};
 use shogi_features::FeatureSet;
 
-/// LayerStack バケット数。YaneuraOu SFNN は KingRank9 (3x3) 固定で、変換対象も
-/// これに揃える。
+/// YaneuraOu SFNN が格納する LayerStack 数。routing 規則は binary に含まれない。
 const YO_LAYER_STACKS: usize = YANEURAOU_LAYER_STACKS;
 
 /// 変換対象の SFNN 次元上限。実在アーキは十分収まり、壊れた arch 文字列 (0 次元 /
@@ -34,10 +33,14 @@ struct Args {
     /// YaneuraOu nn.bin
     #[arg(long)]
     output: PathBuf,
-    /// Assert that the input was trained with `--bucket-mode kingrank9`.
-    /// Quantised `.bin` files do not record their bucket routing mode.
-    #[arg(long)]
+    /// 入力が`--bucket-mode kingrank9`で学習されたことを明示する。
+    /// 量子化`.bin`はbucket routing modeを記録しない。
+    #[arg(long, conflicts_with = "assume_progress8kpabs")]
     assume_kingrank9: bool,
+    /// 入力が既存の9-slot progress routingを使うことを明示する。
+    /// 今回は`--bucket-mode progress8kpabs-legacy9`を確認してから指定する。
+    #[arg(long, conflicts_with = "assume_kingrank9")]
+    assume_progress8kpabs: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.input == args.output {
         return Err("input and output must be different paths".into());
     }
-    require_kingrank9_assertion(args.assume_kingrank9)?;
+    require_routing_assertion(args.assume_kingrank9, args.assume_progress8kpabs)?;
 
     let detect_input = File::open(&args.input)?;
     let arch = detect_arch(&mut BufReader::new(detect_input))?;
@@ -69,13 +72,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn require_kingrank9_assertion(assume_kingrank9: bool) -> io::Result<()> {
-    if !assume_kingrank9 {
-        return invalid_input(
-            "tatara .bin files do not record bucket routing; pass --assume-kingrank9 only after confirming the net was trained with --bucket-mode kingrank9",
-        );
+fn require_routing_assertion(
+    assume_kingrank9: bool,
+    assume_progress8kpabs: bool,
+) -> io::Result<()> {
+    match (assume_kingrank9, assume_progress8kpabs) {
+        (true, false) | (false, true) => Ok(()),
+        (false, false) => invalid_input(
+            "tatara .bin files do not record bucket routing; pass exactly one of --assume-kingrank9 or --assume-progress8kpabs after confirming the training configuration",
+        ),
+        (true, true) => {
+            invalid_input("--assume-kingrank9 and --assume-progress8kpabs are mutually exclusive")
+        }
     }
-    Ok(())
 }
 
 /// `.bin` header (version + network_hash + arch_str + num_buckets) を読み、変換
@@ -107,7 +116,7 @@ fn detect_arch<R: Read>(reader: &mut R) -> io::Result<DetectedArch> {
     };
     if num_buckets != YO_LAYER_STACKS {
         return invalid_input(format!(
-            "YaneuraOu SFNN requires {YO_LAYER_STACKS} LayerStacks (KingRank9), but the input has {num_buckets} buckets"
+            "YaneuraOu SFNN requires {YO_LAYER_STACKS} LayerStacks, but the input has {num_buckets} buckets"
         ));
     }
 
@@ -216,6 +225,7 @@ fn read_u32<R: Read>(reader: &mut R) -> io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use nnue_format::layerstack_weights::build_arch_str;
 
     fn detected(
@@ -238,6 +248,7 @@ mod tests {
             (FeatureSet::HalfKaHmMerged, 1536_usize, 16_usize, 32_usize),
             (FeatureSet::HalfKaHmMerged, 512, 16, 32),
             (FeatureSet::HalfKaHmMerged, 1024, 8, 16),
+            (FeatureSet::HalfKaHmMerged, 1024, 16, 64),
             (FeatureSet::HalfKp, 1536, 16, 32),
             (FeatureSet::HalfKaSplit, 768, 16, 32),
             (FeatureSet::HalfKaMerged, 1536, 16, 32),
@@ -391,11 +402,34 @@ mod tests {
     }
 
     #[test]
-    fn kingrank9_requires_an_explicit_assertion() {
-        let error = require_kingrank9_assertion(false).unwrap_err();
+    fn routing_mode_requires_exactly_one_explicit_assertion() {
+        let error = require_routing_assertion(false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("--assume-kingrank9"));
-        require_kingrank9_assertion(true).unwrap();
+        assert!(error.to_string().contains("--assume-progress8kpabs"));
+
+        require_routing_assertion(true, false).unwrap();
+        require_routing_assertion(false, true).unwrap();
+
+        let error = require_routing_assertion(true, true).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn routing_assertion_flags_conflict_at_cli_parse() {
+        let error = Args::try_parse_from([
+            "net_to_yo",
+            "--input",
+            "input.bin",
+            "--output",
+            "nn.bin",
+            "--assume-kingrank9",
+            "--assume-progress8kpabs",
+        ])
+        .err()
+        .expect("routing assertions must conflict");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// zeroed weights から合成した tatara `.bin` を返す。

@@ -343,6 +343,13 @@ mod tests {
                 "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->512x2],Network=SFNN_HALFKAHM2_512_15_32_K3K3{LayerStack=9}",
             ),
             (
+                FeatureSet::HalfKaHmMerged,
+                1024,
+                16,
+                64,
+                "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1024x2],Network=SFNN_HALFKAHM2_1024_15_64_K3K3{LayerStack=9}",
+            ),
+            (
                 FeatureSet::HalfKp,
                 1536,
                 16,

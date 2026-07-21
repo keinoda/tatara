@@ -273,6 +273,33 @@ fn kingrank9_bucket_mode_validation() {
 }
 
 #[test]
+fn progress_legacy9_bucket_mode_validation() {
+    let valid = layerstack_args(&[
+        "--bucket-mode",
+        "progress8kpabs-legacy9",
+        "--num-buckets",
+        "9",
+        "--progress-coeff",
+        "progress.bin",
+    ]);
+    assert_eq!(
+        validate_bucket_mode(&valid)
+            .expect("legacy9 should accept 9 slots")
+            .canonical_name(),
+        "progress8kpabs-legacy9"
+    );
+
+    let wrong_count = layerstack_args(&[
+        "--bucket-mode",
+        "progress8kpabs-legacy9",
+        "--num-buckets",
+        "8",
+    ]);
+    let err = validate_bucket_mode(&wrong_count).unwrap_err().to_string();
+    assert!(err.contains("must be 9"), "{err}");
+}
+
+#[test]
 fn simple_subcommand_parses() {
     let cli = Cli::try_parse_from(["nnue-train", "simple"]).expect("simple subcommand");
     assert_eq!(cli.arch.kind(), ArchKind::Simple);

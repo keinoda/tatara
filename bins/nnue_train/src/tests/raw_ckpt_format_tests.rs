@@ -215,6 +215,7 @@ fn remove_v7_feature_hash(buf: &mut Vec<u8>, arch: &RawCkptArch) {
 fn raw_ckpt_v8_bucket_modes_round_trip() {
     for arch in [
         layerstack_arch_with_mode("progress8kpabs"),
+        layerstack_arch_with_mode("progress8kpabs-legacy9"),
         layerstack_arch_with_mode("kingrank9"),
         simple_arch(),
     ] {
@@ -230,6 +231,10 @@ fn raw_ckpt_v8_rejects_cross_bucket_mode_resume_in_both_directions() {
     for (written, requested) in [
         ("progress8kpabs", "kingrank9"),
         ("kingrank9", "progress8kpabs"),
+        ("progress8kpabs", "progress8kpabs-legacy9"),
+        ("progress8kpabs-legacy9", "progress8kpabs"),
+        ("progress8kpabs-legacy9", "kingrank9"),
+        ("kingrank9", "progress8kpabs-legacy9"),
     ] {
         let mut buf = Vec::new();
         write_raw_ckpt_header(

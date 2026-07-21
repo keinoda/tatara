@@ -17,6 +17,20 @@ cargo run --release -p net-to-yo -- \
   --assume-kingrank9
 ```
 
+9 slotのまま固定8分割を使うprogress netでは、学習時の
+`--bucket-mode progress8kpabs-legacy9`を確認して次のように変換する。
+
+```bash
+cargo run --release -p net-to-yo -- \
+  --input /path/to/tatara.bin \
+  --output /path/to/eval/nn.bin \
+  --assume-progress8kpabs
+```
+
+量子化`.bin`はrouting規則を記録しないため、2つの`--assume-*` flagのどちらか一方を
+必ず指定する。両方の同時指定も拒否する。flagは確認済みの学習設定を明示するだけで、
+weightの順序や出力binaryは変更しない。
+
 ## `nnue-train` から直接出力
 
 LayerStack を KingRank9 で学習する場合は、推論用 checkpoint を最初から YaneuraOu
@@ -86,12 +100,13 @@ FT 出力次元 (`ft_out`)・L1 出力 (`l1_out`)・L2 出力 (`l2_out`) は任�
 YaneuraOu SFNN に受け皿が無いため、次を含む `.bin` は明示的にエラーにする。
 
 - PSQT / Threat / EffectBucket block を持つ net (`arch_str` に該当トークンがある)
-- 9 以外の bucket 数 (YaneuraOu SFNN は KingRank9 = 9 bucket 固定)
+- 9 以外の LayerStack 数
 
 量子化 `.bin` は bucket routing mode を記録しないため、変換前に学習時の
-`--bucket-mode kingrank9` を確認し、`--assume-kingrank9` で明示する。既定の
-`progress8kpabs` で学習した 9 bucket net は、YaneuraOu と bucket の選択規則が
-異なるため変換できない。
+`--bucket-mode kingrank9`または`progress8kpabs-legacy9`を確認し、それぞれ
+`--assume-kingrank9`または`--assume-progress8kpabs`で明示する。可変N版
+`progress8kpabs --num-buckets 9`は`floor(p * 9)`でslot 8も選ぶため、固定`0.125`境界の
+既存YaneuraOu progress routingとは一致せず、このassertionの対象にしない。
 
 前提として、YaneuraOu 側は `DISTINGUISH_GOLDS` 無効 (既定) で build する。有効
 build は成駒を別 plane に置き feature 次元が変わるため index が一致しない。

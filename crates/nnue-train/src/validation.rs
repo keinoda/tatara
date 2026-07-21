@@ -375,6 +375,40 @@ mod tests {
     }
 
     #[test]
+    fn heldout_set_legacy9_uses_fixed8_routing_and_never_slot8() {
+        let path = sample_psv_path();
+        let set = HeldoutSet::load(
+            &path,
+            8,
+            None,
+            None,
+            8,
+            &BucketMode::Progress8KpAbsLegacy9,
+            test_spec(),
+            9,
+        )
+        .expect("load legacy9 held-out set");
+
+        let mut reader = PsvFileLoader::new(&path).expect("open sample PSV");
+        let mut expected = Vec::new();
+        for _ in 0..8 {
+            let board = reader
+                .next_psv()
+                .expect("read sample PSV")
+                .expect("sample record")
+                .decode();
+            expected.push(i32::from(ShogiProgressKPAbs.bucket_board(&board, 8)));
+        }
+        assert_eq!(set.batches[0].1, expected);
+        assert!(
+            set.batches[0]
+                .1
+                .iter()
+                .all(|&bucket| (0..8).contains(&bucket))
+        );
+    }
+
+    #[test]
     fn sign_agreement_all_draws_counts_nothing() {
         let batch = batch_with_wdl(&[0.5, 0.5, 0.5]);
         let net_output = [1.0_f32, -1.0, 0.0];

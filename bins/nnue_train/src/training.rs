@@ -164,6 +164,16 @@ pub(crate) fn validate_bucket_mode(
             }
             Ok(BucketMode::Progress8KpAbs)
         }
+        "progress8kpabs-legacy9" => {
+            if args.num_buckets != KINGRANK9_NUM_BUCKETS {
+                return Err(format!(
+                    "--num-buckets must be {KINGRANK9_NUM_BUCKETS} when --bucket-mode progress8kpabs-legacy9 is used (got {}); legacy routing keeps 9 slots and emits only 0..=7",
+                    args.num_buckets,
+                )
+                .into());
+            }
+            Ok(BucketMode::Progress8KpAbsLegacy9)
+        }
         "kingrank9" => {
             if args.num_buckets != KINGRANK9_NUM_BUCKETS {
                 return Err(format!(
@@ -180,7 +190,7 @@ pub(crate) fn validate_bucket_mode(
             Ok(BucketMode::KingRank9)
         }
         other => Err(format!(
-            "--bucket-mode '{other}' is unknown (expected 'progress8kpabs' or 'kingrank9')"
+            "--bucket-mode '{other}' is unknown (expected 'progress8kpabs', 'progress8kpabs-legacy9', or 'kingrank9')"
         )
         .into()),
     }
@@ -490,9 +500,9 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
     }
     std::fs::create_dir_all(&cli.output)?;
 
-    // progress8kpabs のみ process-global coefficient を使う。KingRank9 は玉位置から
+    // progress系modeだけがprocess-global coefficientを使う。KingRank9は玉位置から
     // 直接求めるため file I/O も progress model 初期化も行わない。
-    if matches!(bucket_mode, BucketMode::Progress8KpAbs) {
+    if bucket_mode.uses_progress_coeff() {
         match &layerstack.progress_coeff {
             Some(p) => {
                 println!("[train] loading progress8kpabs coeff: {}", p.display());
