@@ -404,6 +404,18 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
         self.assertIn('finalization_mode="existing-completed-smoke"', smoke)
         self.assertIn("FINALIZE_EXISTING_SMOKE=1", runbook)
 
+    def test_export_uses_python3_and_explicit_partial_recovery(self) -> None:
+        export = (SCRIPT_DIR / "run-export-test.sh").read_text(encoding="utf-8")
+        runbook = (
+            REPO_ROOT / "docs/experiments/progress-legacy9-1024x16x64/RUNBOOK.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PYTHON=python3 normal", export)
+        self.assertIn(
+            'CONTINUE_EXISTING_EXPORT="${CONTINUE_EXISTING_EXPORT:-0}"', export
+        )
+        self.assertIn('finalization_mode="existing-conversion-artifacts"', export)
+        self.assertIn("CONTINUE_EXISTING_EXPORT=1", runbook)
+
     def test_saved_checkpoint_selection_ignores_unsaved_best_superbatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)

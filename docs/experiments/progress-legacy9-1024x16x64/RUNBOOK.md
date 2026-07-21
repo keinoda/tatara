@@ -233,6 +233,21 @@ PROGRESS_APPROVAL=<承認manifest> \
 
 T4はSB1 raw checkpointからSB2へoptimizer stateを含めてresumeする。T5は選択smoke networkを
 1024x16x64・9 slotへ変換し、固定YaneuraOuでstartposと7境界上下の14 fixtureを探索する。
+YaneuraOu buildではcontainerに存在する`python3`をMakefileの`PYTHON`変数へ明示する。
+
+T5でnetwork変換と14件のfixture JSONL生成後、engine buildまたは探索だけが失敗した場合は、
+既存成果物を削除・上書き・再変換せず、同じ値で次を実行する。
+
+```bash
+RUN_NAME=<同じrun名> \
+PROGRESS_APPROVAL=<同じ承認manifest> \
+CONTINUE_EXISTING_EXPORT=1 \
+  scripts/experiments/progress-legacy9-1024x16x64/run-export-test.sh
+```
+
+回復経路は、固定smoke network、承認済み境界fixture、変換済みnetwork、14行のJSONL、
+固定YaneuraOu origin/revisionとtracked差分なしを確認し、engine build以降だけを再開する。
+既存の探索logまたはexport gateがある場合は上書きせず停止する。
 
 ## 7. T6: monitor
 
