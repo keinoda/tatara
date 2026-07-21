@@ -37,6 +37,8 @@ readonly TRAIN_DATASET_REVISION="5da309f4de4091cfb004eff94da97d49e3268aa2"
 readonly VALIDATION_DATASET_REVISION="fdd5f602db82d888a87116f087d10dd5ea8313ab"
 readonly CONTAINER_IMAGE="ghcr.io/keinoda/shogi-lab:cuda129-trt1011"
 readonly CONTAINER_IMAGE_DIGEST="sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876"
+readonly FIXED_TRAIN_PRECISION="all-optim"
+readonly FIXED_TRAIN_THREADS=16
 
 fail() {
   echo "ERROR: $*" >&2
@@ -174,10 +176,13 @@ require_progress_approval() {
 precision_from_gate() {
   local gate_dir="$1"
   require_gate "$gate_dir" precision
-  local mode
+  local mode threads
   mode=$(manifest_value "$gate_dir/precision.approved.txt" precision)
-  [[ "$mode" == "fp32" || "$mode" == "all-optim" ]] \
-    || fail "precision承認値が不正です: $mode"
+  threads=$(manifest_value "$gate_dir/precision.approved.txt" threads)
+  [[ "$mode" == "$FIXED_TRAIN_PRECISION" ]] \
+    || fail "precisionは$FIXED_TRAIN_PRECISION固定です: actual=$mode"
+  [[ "$threads" == "$FIXED_TRAIN_THREADS" ]] \
+    || fail "threadsは$FIXED_TRAIN_THREADS固定です: actual=$threads"
   printf '%s\n' "$mode"
 }
 
