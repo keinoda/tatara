@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 取得完了済みの公開教師shardから、明示候補だけを比較する再現可能surveyを実行する。
+# 取得完了済みの公開教師shardを一度だけ読み、単調affine係数を最適化するsurveyを実行する。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -65,6 +65,11 @@ command=(
   --output-dir "$SURVEY_DIR"
   --seed "$SURVEY_SEED"
   --num-buckets 8
+  --optimize-affine
+  --optimize-split calibration
+  --optimized-candidate-name optimized-uniform
+  --optimizer-grid-points 257
+  --optimizer-refinements 6
 )
 
 # 3集合の配分は未決定なので推測しない。合計400万を保ち、3値すべて明示する。
@@ -83,8 +88,8 @@ command+=(
   --split "final-test:$FINAL_TEST_SAMPLES"
 )
 
-# 例: AFFINE_CANDIDATES='wide-a:0.85:-0.20 wide-b:1.00:-0.25'
-# 未指定ならbaseline分布だけを取得する。候補範囲は自動決定しない。
+# 明示候補はoptimizerとは別の補助比較に限る。通常の係数決定には指定しない。
+# 例: AFFINE_CANDIDATES='reference:1.00:-0.25'
 if [[ -n "${AFFINE_CANDIDATES:-}" ]]; then
   read -r -a affine_candidates <<<"$AFFINE_CANDIDATES"
   for candidate in "${affine_candidates[@]}"; do
@@ -125,7 +130,13 @@ input_shards_manifest="$SURVEY_DIR/input-shards.txt"
   printf 'sample_plan_sha256=%s\n' "$(sha256_file "$SURVEY_DIR/sample-plan.bin")"
   printf 'input_shards=%s\n' "$input_shards_manifest"
   printf 'input_shards_sha256=%s\n' "$(sha256_file "$input_shards_manifest")"
+  printf 'affine_optimization=uniform-bucket-mse\n'
+  printf 'optimization_split=calibration\n'
+  printf 'optimized_candidate=optimized-uniform\n'
+  printf 'optimizer_grid_points=257\n'
+  printf 'optimizer_refinements=6\n'
+  printf 'teacher_data_passes=1\n'
   printf 'automatic_adoption=false\n'
 } | write_manifest_atomic "$SURVEY_DIR/manifest.txt"
 
-echo "[survey] 完了しました。metrics.jsonを提示してからapprove-progress.shを実行してください"
+echo "[survey] 最適化まで完了しました。metrics.jsonを提示してからapprove-progress.shを実行してください"

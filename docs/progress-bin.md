@@ -74,6 +74,34 @@ It prints a per-bucket count and percentage plus the top bucket's share. Only
 one `progress.bin` can be loaded per run, so to compare epochs run it once per
 `<run-name>.e<N>.bin` and compare the outputs.
 
+Use random survey mode to find a monotone affine correction that moves the
+fixed-width buckets toward a uniform distribution:
+
+```bash
+target/release/progress-bucket-survey \
+  --data <comma-separated-psv-files> \
+  --progress <baseline-progress.bin> \
+  --output-dir <survey-output> \
+  --seed 20260721 \
+  --split calibration:2000000 \
+  --split selection:1000000 \
+  --split final-test:1000000 \
+  --num-buckets 8 \
+  --optimize-affine \
+  --optimize-split calibration \
+  --optimized-candidate-name optimized-uniform
+```
+
+The command reads each sampled PSV once and sorts the calibration baseline
+logits. It maps the transformed bucket boundaries back into baseline-logit
+space, constrains `a > 0`, and deterministically minimizes the mean squared
+error between every bucket fraction and `1 / num-buckets`. The selection and
+final-test splits are evaluation-only. Equal-MSE candidates are resolved by
+maximum bucket deviation, boundary-logit fit, `a`, then `b`. It writes `metrics.json`, boundary
+fixtures, and `progress-optimized-uniform.bin`, but never adopts the generated
+candidate automatically. Add `--candidate NAME:A:B` only to compare a known
+coefficient pair in the same run.
+
 Once you have a `progress.bin` you are happy with, pass it to `nnue-train` via
 `--progress-coeff` when training a `layerstack` net (see
 [docs/training-quickstart.md](training-quickstart.md)).

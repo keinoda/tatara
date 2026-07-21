@@ -125,8 +125,14 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertIn('total_shard_positions >= 4000000', script)
         self.assertIn('input-shards.txt', script)
         self.assertIn('input_shards_sha256', script)
+        self.assertIn('--optimize-affine', script)
+        self.assertIn('--optimize-split calibration', script)
+        self.assertIn('--optimized-candidate-name optimized-uniform', script)
+        self.assertIn('teacher_data_passes=1', script)
         self.assertIn('T1の完了を待たず', plan)
         self.assertIn('T1の完了を待たず', runbook)
+        self.assertIn('1回だけ読', plan)
+        self.assertIn('1回だけ読', runbook)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -201,6 +207,9 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             self.assertIn("total_positions=4000000", input_snapshot)
             self.assertIn(str(shard), input_snapshot)
             self.assertIn("input_shards_sha256=", manifest)
+            self.assertIn("affine_optimization=uniform-bucket-mse", manifest)
+            self.assertIn("optimized_candidate=optimized-uniform", manifest)
+            self.assertIn("automatic_adoption=false", manifest)
 
             second_shard = root / "data/training/shards/dlsuisho_unique_002.bin"
             with second_shard.open("wb") as stream:

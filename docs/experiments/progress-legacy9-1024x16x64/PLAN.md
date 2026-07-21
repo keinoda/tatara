@@ -8,9 +8,10 @@ RTX 5090 1枚で、公開済み・shuffle済みの
 `progress8kpabs --num-buckets 8`をそのまま使い、YaneuraOuへのexport時だけ
 bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket学習は導入しない。
 
-基準`progress.bin`でbucket 0が薄い問題は、教師の手数・総手数を復元せず、既存出力に
-`z' = a*z+b`を適用できる明示候補だけをsurveyする。分布とbucket移動をユーザーへ提示し、
-承認された係数だけを使う。候補の自動探索・自動採用は行わない。
+基準`progress.bin`でbucket 0が薄い問題は、教師の手数・総手数を復元せず、既存出力へ
+`z' = a*z+b`を適用する。400万局面を一度だけ読んでbaseline logitを保持し、`a > 0`で元の
+progressとの単調性を保ちながら、8 bucketの比率と12.5%の平均二乗誤差を最小化する。
+最適化結果、分布、bucket移動をユーザーへ提示し、承認された係数だけを使う。自動採用は行わない。
 
 ## 固定する実験条件
 
@@ -26,7 +27,8 @@ bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket
 | batches / superbatch | 6,104 |
 | precision | `--all-optim` |
 | worker threads | 16 |
-| survey | calibration 200万、selection 100万、final-test 100万、seed `20260721` |
+| survey | calibration 200万、selection 100万、final-test 100万、seed `20260721`、教師読込み1回 |
+| affine optimizer | `a > 0`、uniform比率MSE、257×257全域格子＋6回絞込み |
 | 初回 | 367 superbatch、約10.0083 epoch |
 | LR | step、start 0.000875、gamma 0.992、every 1 superbatch |
 | loss | WRM、既存Tatara基準値を維持 |
@@ -44,7 +46,7 @@ workerが2以上なのでoptimizerへ届く順序は非決定的であり、bit�
 |---|---|---|---|
 | T0 | 固定revision、image、RTX 5090、build | `onstart.sh` | `build_tatara.done`、`build_rshogi.done` |
 | T1 | 30 shard、連結PSV、validation、SHA-256 | `onstart.sh` | `prepare_data.done` |
-| T2 | 重複なし400万局面survey | `run-survey.sh` | `metrics.json`を提示し、`approve-progress.sh`で承認 |
+| T2 | 重複なし400万局面のone-pass affine最適化 | `run-survey.sh` | `metrics.json`を提示し、`approve-progress.sh`で承認 |
 | T3 | all-optim、16 threadの固定smoke | `run-smoke.sh` | run完走・有限metricを検証し、固定値manifestを生成 |
 | T4 | raw checkpoint true resume | `run-resume-drill.sh` | SB1からSB2へのlineageとhistoryを検証 |
 | T5 | 8→9 export、YaneuraOu load/search | `run-export-test.sh` | startposと14境界fixtureが完走 |
@@ -55,12 +57,14 @@ workerが2以上なのでoptimizerへ届く順序は非決定的であり、bit�
 
 T2はT1の完了を待たず、公開教師の取得完了済みshardが1個以上かつ合計400万局面以上になった時点で
 開始できる。survey開始時のshard一覧を固定し、実行中に追加で取得完了したshardは同じsurveyへ
-混ぜない。候補比較ではbaselineの`input-shards.txt`を`SURVEY_INPUT_MANIFEST`に指定し、後から
-増えたshardを除外して同じ母集団を再利用する。T1だけが30 shard全部と連結PSVを必要とする。
+混ぜない。通常は同じ教師を再読込みする別surveyを行わず、1回の実行内でbaseline取得、係数最適化、
+3 split評価、候補`progress.bin`生成まで完了する。失敗再現などで再実行する場合だけ、元surveyの
+`input-shards.txt`を`SURVEY_INPUT_MANIFEST`に指定する。T1だけが30 shard全部と連結PSVを必要とする。
 
 ## Surveyの評価対象
 
 - 各splitのbucket 0–7件数と比率
+- 各splitの12.5%からの平均二乗誤差と最大乖離
 - baselineからのmigration matrix
 - 7境界それぞれのcrossing率
 - total variation
@@ -69,10 +73,14 @@ T2はT1の完了を待たず、公開教師の取得完了済みshardが1個以�
 - 各境界の直下・直上に最も近いfixture
 
 samplingは開始時点で取得完了しているshardのglobal record index上で決定的に行い、重複なしで
-抽出した後、file offset順に読む。入力shard・size・局面数は`input-shards.txt`へ記録する。
-calibration 2,000,000、selection 1,000,000、final-test 1,000,000、seed `20260721`を使う。
-final-testを見た後に候補を再調整する場合、その結果を未使用testとは扱わず、新しいsurvey IDで
-やり直す。
+抽出した後、file offset順に1回だけ読む。calibrationのbaseline logitをsortし、affine後の7境界を
+元logit空間へ逆写像して二分探索で比率を評価する。最初と最後の境界位置でparameterizeするため
+`a > 0`が構造的に保証される。探索域は両境界がcalibration logitの最小–最大内にある全組合せとする。
+MSEが同値なら最大乖離、7境界のlogit fit MSE、`a`、`b`の順に比較して結果を決定的にする。
+入力shard・size・局面数は`input-shards.txt`へ記録する。
+calibration 2,000,000だけを最適化に使い、selection 1,000,000とfinal-test 1,000,000は評価専用、
+seedは`20260721`とする。final-testを見た後に最適化方法を変える場合、その結果を未使用testとは
+扱わず、新しいsurvey IDでやり直す。
 
 ## 本学習後の判定
 

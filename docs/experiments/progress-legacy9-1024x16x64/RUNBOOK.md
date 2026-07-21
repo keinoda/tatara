@@ -130,8 +130,9 @@ dataset、manifestは上書きしない。checksum不一致はtransient failure�
 
 T1の完了を待たず、取得完了済みshardの合計が400万局面以上なら実行できる。scriptは開始時点の
 確定済み`.bin`だけを入力として固定し、実行中に追加で完了したshardを混ぜない。使用したfile・
-size・局面数は`survey/<SURVEY_ID>/input-shards.txt`へ記録する。`AFFINE_CANDIDATES`は
-`name:a:b`を空白区切りで渡し、未指定ならbaseline分布だけを測って候補を生成しない。
+size・局面数は`survey/<SURVEY_ID>/input-shards.txt`へ記録する。400万局面は1回だけ読み、
+calibrationのbaseline logitを使って`a > 0`の`optimized-uniform`候補を自動生成する。
+目的関数は8 bucket比率の12.5%からの平均二乗誤差で、selectionとfinal-testは最適化に使わない。
 
 ```bash
 SURVEY_ID=<新しいsurvey名> \
@@ -139,18 +140,22 @@ SURVEY_SEED=20260721 \
 CALIBRATION_SAMPLES=2000000 \
 SELECTION_SAMPLES=1000000 \
 FINAL_TEST_SAMPLES=1000000 \
-AFFINE_CANDIDATES='<候補名>:<a>:<b> <候補名>:<a>:<b>' \
   scripts/experiments/progress-legacy9-1024x16x64/run-survey.sh
 ```
 
-baseline提示後の候補比較は、新しいshardを混ぜず同じ母集団を使うため、上のcommandへ次を追加する。
+`AFFINE_CANDIDATES='<候補名>:<a>:<b>'`は既知係数を同じsample上で補助比較する場合だけ追加する。
+通常の係数決定には指定せず、baseline取得、最適化、3 split評価、候補`progress.bin`生成までを
+上の1回で完了する。
+
+失敗再現などで同じ入力snapshotを再利用する必要がある場合だけ、上のcommandへ次を追加する。
 
 ```bash
 SURVEY_INPUT_MANIFEST=survey/<baselineのSURVEY_ID>/input-shards.txt
 ```
 
-`survey/<SURVEY_ID>/metrics.json`をユーザーへ提示する。bucket 0だけでなくmigration、境界crossing、
-total variation、飽和、3 splitの差を確認する。採用候補を自動で決めない。
+`survey/<SURVEY_ID>/metrics.json`をユーザーへ提示する。最適化された`a,b`、12.5%からのMSEと最大乖離、
+bucket 0–7、migration、境界crossing、total variation、飽和、3 splitの差を確認する。
+`optimized-uniform`を自動採用しない。
 
 ```bash
 SURVEY_ID=<survey名> \

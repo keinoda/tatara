@@ -69,5 +69,29 @@ bucket ごとの件数・割合と top bucket の占有率を表示する。1 �
 `progress.bin` は 1 つなので、epoch を比較するときは `<run-name>.e<N>.bin` ごとに
 1 回ずつ実行して出力を比べる。
 
+固定幅bucketを均等分布へ近づけるaffine補正を求める場合はrandom survey modeを使う。
+
+```bash
+target/release/progress-bucket-survey \
+  --data <comma-separated-psv-files> \
+  --progress <baseline-progress.bin> \
+  --output-dir <survey-output> \
+  --seed 20260721 \
+  --split calibration:2000000 \
+  --split selection:1000000 \
+  --split final-test:1000000 \
+  --num-buckets 8 \
+  --optimize-affine \
+  --optimize-split calibration \
+  --optimized-candidate-name optimized-uniform
+```
+
+sampled PSVは1回だけ読み、calibrationのbaseline logitをsortする。affine後のbucket境界を
+元logit空間へ逆写像し、`a > 0`を保ったまま各bucket比率と`1 / num-buckets`の平均二乗誤差を
+決定的な格子探索で最小化する。同一MSEでは最大乖離、境界logit fit、`a`、`b`の順をtie-breakに使う。
+selectionとfinal-testは評価専用である。`metrics.json`、境界fixture、
+補正済み`progress-optimized-uniform.bin`を生成するが、自動採用はしない。既知の`a,b`を同時比較
+したい場合だけ`--candidate NAME:A:B`を追加する。
+
 満足のいく `progress.bin` が得られたら、`layerstack` net の学習時に `nnue-train`
 へ `--progress-coeff` で渡す([docs/training-quickstart.ja.md](training-quickstart.ja.md) 参照)。
