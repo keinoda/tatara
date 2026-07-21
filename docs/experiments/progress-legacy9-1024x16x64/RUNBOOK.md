@@ -193,9 +193,24 @@ PROGRESS_APPROVAL=<承認manifestの絶対path> \
   scripts/experiments/progress-legacy9-1024x16x64/run-smoke.sh
 ```
 
-scriptは`all-optim-t16`を1回実行する。runがcomplete、loss/test loss/clamp metricが有限である
+scriptは`all-optim-t16`を1回実行する。runが`completed`、loss/test loss/clamp metricが有限である
 ことを検証し、`gates/<RUN_NAME>/precision.approved.txt`へ固定値を記録して`smoke.done`と
 `precision.done`を作る。`smoke/report.json`のclampとthroughputは後続gateへ進む前に確認する。
+
+trainer、量子化checkpoint、raw checkpoint、experiment JSON、reportまで完走した後にgate検証だけが
+失敗した場合は、成果物を削除・上書き・再学習せず、同じ`RUN_NAME`、`PROGRESS_APPROVAL`、
+`SMOKE_BATCHES`（未指定時は8）を使って次を実行する。
+
+```bash
+RUN_NAME=<同じrun名> \
+PROGRESS_APPROVAL=<同じ承認manifest> \
+FINALIZE_EXISTING_SMOKE=1 \
+  scripts/experiments/progress-legacy9-1024x16x64/run-smoke.sh
+```
+
+回復経路は、元のcommand、PSV size、単一experiment、`completed`かつ非中断の状態、SB1履歴、
+固定構成、`.bin`/`.ckpt`、有限metric、trainer commitを検証し、不足しているgate文書だけを作る。
+既存gateが一つでもある場合や固定contractと一致しない場合は停止する。
 
 `approve-smoke.sh`は既存の手順との互換用で、固定値manifestをread-only確認する場合だけ使う。
 

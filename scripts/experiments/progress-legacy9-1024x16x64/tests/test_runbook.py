@@ -366,9 +366,9 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             (experiment_dir / "smoke.json").write_text(
                 json.dumps(
                     {
-                        "status": "complete",
+                        "status": "completed",
                         "params": {"tf32": True, "threads": 30},
-                        "results": {"mean_pos_per_sec": 5000},
+                        "results": {"mean_pos_per_sec": 5000, "interrupted": False},
                         "history": [
                             {
                                 "superbatch": 1,
@@ -385,9 +385,24 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                 "[fp16-clamp] layer=ft ratio=1.5e-5\n", encoding="utf-8"
             )
             report = summary.load_run(run)
+            self.assertEqual(report["status"], "completed")
             self.assertEqual(report["precision"], "all-optim")
             self.assertEqual(report["threads"], 30)
             self.assertAlmostEqual(report["max_fp16_clamp_ratio"], 1.5e-5)
+
+    def test_smoke_scripts_use_completed_status_and_explicit_recovery(self) -> None:
+        smoke = (SCRIPT_DIR / "run-smoke.sh").read_text(encoding="utf-8")
+        resume = (SCRIPT_DIR / "run-resume-drill.sh").read_text(encoding="utf-8")
+        runbook = (
+            REPO_ROOT / "docs/experiments/progress-legacy9-1024x16x64/RUNBOOK.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn('run.get("status") != "completed"', smoke)
+        self.assertIn('doc.get("status") != "completed"', resume)
+        self.assertNotIn('get("status") != "complete"', smoke)
+        self.assertNotIn('get("status") != "complete"', resume)
+        self.assertIn('FINALIZE_EXISTING_SMOKE="${FINALIZE_EXISTING_SMOKE:-0}"', smoke)
+        self.assertIn('finalization_mode="existing-completed-smoke"', smoke)
+        self.assertIn("FINALIZE_EXISTING_SMOKE=1", runbook)
 
     def test_saved_checkpoint_selection_ignores_unsaved_best_superbatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

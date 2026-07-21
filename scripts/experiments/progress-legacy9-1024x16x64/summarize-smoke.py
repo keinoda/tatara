@@ -18,6 +18,13 @@ def load_run(path: Path) -> dict[str, object]:
         raise SystemExit(f"ERROR: expected one experiment JSON under {path}, got {len(experiments)}")
     with experiments[0].open(encoding="utf-8") as stream:
         experiment = json.load(stream)
+    if experiment.get("status") != "completed":
+        raise SystemExit(
+            f"ERROR: smoke experiment is not completed: "
+            f"{experiments[0]} status={experiment.get('status')!r}"
+        )
+    if (experiment.get("results") or {}).get("interrupted") is not False:
+        raise SystemExit(f"ERROR: smoke experiment is interrupted: {experiments[0]}")
     history = experiment.get("history", [])
     if len(history) != 1:
         raise SystemExit(f"ERROR: smoke history must contain exactly one SB: {experiments[0]}")

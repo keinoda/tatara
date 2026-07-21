@@ -66,8 +66,10 @@ if lineage.get("resumed_from_superbatch") != 1:
 history = doc.get("history") or []
 if len(history) != 1 or history[0].get("superbatch") != 2:
     raise SystemExit(f"ERROR: resumed history is not exactly SB2: {history}")
-if doc.get("status") != "complete":
+if doc.get("status") != "completed":
     raise SystemExit(f"ERROR: resumed experiment is not complete: {doc.get('status')}")
+if (doc.get("results") or {}).get("interrupted") is not False:
+    raise SystemExit("ERROR: resumed experiment is marked interrupted")
 PY
 
 {
