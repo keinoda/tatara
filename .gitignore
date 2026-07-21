@@ -39,7 +39,9 @@
 **/*.bc
 
 # local 計測ログ / 仮説検証メモ (commit せず手元で保管)
-/docs/experiments
+/docs/experiments/*
+!/docs/experiments/progress-legacy9-1024x16x64/
+!/docs/experiments/progress-legacy9-1024x16x64/**
 
 # local issue (GitHub Issue を立てない課題の spec、1 file = 1 issue)
 /docs/issue/
