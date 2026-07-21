@@ -296,6 +296,12 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                         "commit": "a" * 40,
                         "history": [
                             {
+                                "superbatch": 1,
+                                "loss": 0.15,
+                                "test_loss": 0.14,
+                                "test_accuracy": 0.68,
+                            },
+                            {
                                 "superbatch": 2,
                                 "loss": 0.12,
                                 "test_loss": 0.13,
@@ -317,9 +323,41 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             status = json.loads((output / "status.json").read_text(encoding="utf-8"))
             html = (output / "index.html").read_text(encoding="utf-8")
             self.assertEqual(status["latest"]["superbatch"], 2)
+            self.assertEqual(len(status["history"]), 2)
             self.assertEqual(status["results"]["best_test_loss"], 0.13)
             self.assertIn("run-a", html)
+            self.assertIn('data-chart="loss"', html)
+            self.assertIn('data-chart="test-accuracy"', html)
+            self.assertIn("train loss", html)
+            self.assertIn("test loss", html)
+            self.assertIn("<polyline", html)
+            self.assertNotIn("<script", html)
             self.assertNotIn("MONITOR_PASSWORD", html)
+
+    def test_monitor_chart_ignores_non_finite_values(self) -> None:
+        monitor = load_module("tatara_monitor_non_finite", SCRIPT_DIR / "monitor.py")
+        chart = monitor.render_line_chart(
+            [
+                {"superbatch": 1, "loss": 0.2},
+                {"superbatch": 2, "loss": float("nan")},
+                {"superbatch": 3, "loss": 0.1},
+            ],
+            chart_id="loss",
+            title="loss",
+            series=(("train loss", "loss", "#2563eb"),),
+        )
+        self.assertIn("<polyline", chart)
+        self.assertNotIn("nan", chart.lower())
+
+        one_point = monitor.render_line_chart(
+            [{"superbatch": 1, "test_accuracy": 0.7}],
+            chart_id="test-accuracy",
+            title="test accuracy",
+            series=(("test accuracy", "test_accuracy", "#059669"),),
+            percent=True,
+        )
+        self.assertIn("<circle", one_point)
+        self.assertNotIn("<polyline", one_point)
 
     def test_monitor_server_requires_basic_auth_and_has_only_two_routes(self) -> None:
         server_module = load_module("tatara_monitor_server", SCRIPT_DIR / "monitor_server.py")
