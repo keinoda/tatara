@@ -406,6 +406,7 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
 
     def test_export_uses_python3_and_explicit_partial_recovery(self) -> None:
         export = (SCRIPT_DIR / "run-export-test.sh").read_text(encoding="utf-8")
+        smoke = (SCRIPT_DIR / "yaneuraou-smoke.py").read_text(encoding="utf-8")
         runbook = (
             REPO_ROOT / "docs/experiments/progress-legacy9-1024x16x64/RUNBOOK.md"
         ).read_text(encoding="utf-8")
@@ -414,7 +415,80 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             'CONTINUE_EXISTING_EXPORT="${CONTINUE_EXISTING_EXPORT:-0}"', export
         )
         self.assertIn('finalization_mode="existing-conversion-artifacts"', export)
+        self.assertIn("EXPORT_TRANSCRIPT_NAME", export)
+        self.assertIn('send(process, "setoption name BookFile value no_book")', smoke)
         self.assertIn("CONTINUE_EXISTING_EXPORT=1", runbook)
+
+    def test_yaneuraou_smoke_disables_book_and_gets_all_bestmoves(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            engine = root / "fake-engine.py"
+            engine.write_text(
+                """#!/usr/bin/env python3
+import sys
+
+book_disabled = False
+progress = None
+for raw in sys.stdin:
+    command = raw.rstrip("\\n")
+    if command == "usi":
+        print("option name EvalDir type string default eval")
+        print("option name LS_PROGRESS_COEFF type string default <internal>")
+        print("option name LS_BUCKET_MODE type combo default progress8kpabs")
+        print("option name BookFile type combo default standard_book.db var no_book")
+        print("usiok", flush=True)
+    elif command.startswith("setoption name LS_PROGRESS_COEFF value "):
+        progress = command.split(" value ", 1)[1]
+    elif command == "setoption name BookFile value no_book":
+        book_disabled = True
+    elif command == "isready":
+        if not book_disabled:
+            print("info string Error! : attempted to load a book")
+        print(f"info string loading progress file : {progress}")
+        print("readyok", flush=True)
+    elif command.startswith("go nodes "):
+        print("bestmove 7g7f", flush=True)
+    elif command == "quit":
+        break
+""",
+                encoding="utf-8",
+            )
+            engine.chmod(0o755)
+            fixtures = root / "fixtures.jsonl"
+            fixtures.write_text(
+                "".join(json.dumps({"sfen": f"fixture-{index}"}) + "\n" for index in range(14)),
+                encoding="utf-8",
+            )
+            transcript = root / "transcript.log"
+            completed = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPT_DIR / "yaneuraou-smoke.py"),
+                    "--engine",
+                    str(engine),
+                    "--eval-dir",
+                    str(root / "eval"),
+                    "--progress",
+                    str(root / "progress.bin"),
+                    "--fixtures-jsonl",
+                    str(fixtures),
+                    "--transcript",
+                    str(transcript),
+                    "--nodes",
+                    "1",
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+            )
+            output = transcript.read_text(encoding="utf-8")
+            self.assertEqual(output.count("bestmove "), 15)
+            self.assertNotIn("attempted to load a book", output)
 
     def test_saved_checkpoint_selection_ignores_unsaved_best_superbatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

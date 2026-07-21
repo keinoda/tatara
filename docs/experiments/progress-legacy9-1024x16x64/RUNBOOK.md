@@ -247,7 +247,18 @@ CONTINUE_EXISTING_EXPORT=1 \
 
 回復経路は、固定smoke network、承認済み境界fixture、変換済みnetwork、14行のJSONL、
 固定YaneuraOu origin/revisionとtracked差分なしを確認し、engine build以降だけを再開する。
-既存の探索logまたはexport gateがある場合は上書きせず停止する。
+探索時は`BookFile=no_book`を明示し、評価networkとprogressだけを検証対象にする。前回の探索logが
+残っている場合は、それを保持したまま次のように新しいbasenameを指定する。
+
+```bash
+RUN_NAME=<同じrun名> \
+PROGRESS_APPROVAL=<同じ承認manifest> \
+CONTINUE_EXISTING_EXPORT=1 \
+EXPORT_TRANSCRIPT_NAME=<未使用の名前.log> \
+  scripts/experiments/progress-legacy9-1024x16x64/run-export-test.sh
+```
+
+指定した探索logまたはexport gateが既にある場合は上書きせず停止する。
 
 ## 7. T6: monitor
 

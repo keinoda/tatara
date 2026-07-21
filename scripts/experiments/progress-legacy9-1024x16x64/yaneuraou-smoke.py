@@ -82,13 +82,19 @@ def main() -> None:
             send(process, "usi")
             usi_lines = wait_for(output, lambda line: line == "usiok", args.timeout, "usiok")
             options = "\n".join(usi_lines)
-            for required in ("option name EvalDir", "option name LS_PROGRESS_COEFF", "option name LS_BUCKET_MODE"):
+            for required in (
+                "option name EvalDir",
+                "option name LS_PROGRESS_COEFF",
+                "option name LS_BUCKET_MODE",
+                "option name BookFile",
+            ):
                 if required not in options:
                     raise RuntimeError(f"required USI option is missing: {required}")
             send(process, f"setoption name EvalDir value {args.eval_dir}")
             send(process, "setoption name FV_SCALE value 28")
             send(process, f"setoption name LS_PROGRESS_COEFF value {args.progress}")
             send(process, "setoption name LS_BUCKET_MODE value progress8kpabs")
+            send(process, "setoption name BookFile value no_book")
             send(process, "isready")
             ready_lines = wait_for(output, lambda line: line == "readyok", args.timeout, "readyok")
             ready_text = "\n".join(ready_lines)

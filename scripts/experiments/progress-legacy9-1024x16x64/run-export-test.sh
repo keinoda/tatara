@@ -22,11 +22,16 @@ require_exact_size "$boundary_psv" 560 "7境界上下fixture PSV"
 
 readonly EXPORT_ROOT="$GATE_DIR/export-test"
 readonly CONTINUE_EXISTING_EXPORT="${CONTINUE_EXISTING_EXPORT:-0}"
+readonly EXPORT_TRANSCRIPT_NAME="${EXPORT_TRANSCRIPT_NAME:-yaneuraou.log}"
 [[ "$CONTINUE_EXISTING_EXPORT" =~ ^[01]$ ]] \
   || fail "CONTINUE_EXISTING_EXPORTは0または1にしてください"
+[[ "$EXPORT_TRANSCRIPT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.log$ ]] \
+  || fail "EXPORT_TRANSCRIPT_NAMEは安全なbasename（*.log）にしてください"
+transcript="$EXPORT_ROOT/$EXPORT_TRANSCRIPT_NAME"
 for gate_artifact in "$EXPORT_ROOT/manifest.txt" "$GATE_DIR/export.done"; do
   [[ ! -e "$gate_artifact" ]] || fail "既存export gateを上書きしません: $gate_artifact"
 done
+[[ ! -e "$transcript" ]] || fail "既存のYaneuraOu探索logを上書きしません: $transcript"
 
 input_bin="$GATE_DIR/smoke/${precision}-t${threads}/checkpoints/smoke-$RUN_NAME-${precision}-t${threads}-1.bin"
 [[ -s "$input_bin" ]] || fail "選択smoke networkがありません: $input_bin"
@@ -48,8 +53,6 @@ else
   [[ -d "$EXPORT_ROOT/eval" ]] || fail "既存export testのeval directoryがありません"
   [[ -s "$output_bin" ]] || fail "既存の変換済みYaneuraOu networkがありません: $output_bin"
   [[ -s "$fixtures_jsonl" ]] || fail "既存のboundary fixture JSONLがありません: $fixtures_jsonl"
-  [[ ! -e "$EXPORT_ROOT/yaneuraou.log" ]] \
-    || fail "既存のYaneuraOu探索logを上書きしません: $EXPORT_ROOT/yaneuraou.log"
   finalization_mode="existing-conversion-artifacts"
   echo "[export-test] 既存の変換成果物を再生成せず、engine build以降を再開します"
 fi
@@ -82,9 +85,9 @@ python3 "$EXPERIMENT_SCRIPT_DIR/yaneuraou-smoke.py" \
   --eval-dir "$EXPORT_ROOT/eval" \
   --progress "$progress_bin" \
   --fixtures-jsonl "$fixtures_jsonl" \
-  --transcript "$EXPORT_ROOT/yaneuraou.log" \
+  --transcript "$transcript" \
   --nodes 100
-[[ "$(grep -c '^bestmove ' "$EXPORT_ROOT/yaneuraou.log")" == 15 ]] \
+[[ "$(grep -c '^bestmove ' "$transcript")" == 15 ]] \
   || fail "startpos + 14境界fixtureのbestmoveを確認できませんでした"
 
 {
@@ -98,6 +101,8 @@ python3 "$EXPERIMENT_SCRIPT_DIR/yaneuraou-smoke.py" \
   printf 'yaneuraou_engine_sha256=%s\n' "$(sha256_file "$ENGINE")"
   printf 'progress_sha256=%s\n' "$(sha256_file "$progress_bin")"
   printf 'finalization_mode=%s\n' "$finalization_mode"
+  printf 'transcript=%s\n' "$transcript"
+  printf 'transcript_sha256=%s\n' "$(sha256_file "$transcript")"
   printf 'boundary_positions=14\n'
   printf 'bestmoves=15\n'
 } | write_manifest_atomic "$EXPORT_ROOT/manifest.txt"
