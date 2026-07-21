@@ -65,3 +65,7 @@
 .idea/
 .vscode/
 *.swp
+
+# Python実行時bytecode（runbook test・monitor importで生成）
+__pycache__/
+*.py[cod]
