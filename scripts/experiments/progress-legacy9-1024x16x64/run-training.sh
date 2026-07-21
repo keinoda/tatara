@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 公開教師を使う1024x16x64 legacy progress学習を手動開始する。
+# 公開教師を使う1024x16x64 fixed8 progress学習を手動開始する。
 # progress係数はsurvey後にユーザーが選択したpathを必ず明示する。
 set -Eeuo pipefail
 
@@ -126,8 +126,8 @@ command=(
   --l1 16
   --l2 64
   --fv-scale 28
-  --bucket-mode progress8kpabs-legacy9
-  --num-buckets 9
+  --bucket-mode progress8kpabs
+  --num-buckets 8
   --progress-coeff "$LEGACY_PROGRESS_BIN"
 )
 

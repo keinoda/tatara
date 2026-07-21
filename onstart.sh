@@ -246,7 +246,8 @@ cd "$EXPERIMENT_ROOT"
 bash scripts/setup-cuda-oxide.sh
 bash scripts/build-kernels.sh
 cargo build --release -p nnue-trainer -p net-to-yo -p progress-bucket-survey
-target/release/nnue-train layerstack --help | grep -F 'progress8kpabs-legacy9'
+target/release/nnue-train layerstack --help | grep -F -- '--num-buckets'
+target/release/nnue-train layerstack --help | grep -F 'progress8kpabs'
 target/release/net_to_yo --help | grep -F 'assume-progress8kpabs'
 STEP
 start_step build_tatara "$build_tatara_body"
@@ -440,7 +441,8 @@ cat <<SUMMARY
 固定学習値:
   batch-size=65536, batches-per-superbatch=6104, superbatches=367
   lr=0.000875, schedule=step, gamma=0.992, step=1
-  architecture=1024x16x64, 9 slots, fixed 8-way progress routing
+  architecture=1024x16x64, 8 training buckets, fixed 8-way progress routing
+  export=net_to_yoがbucket 7を未使用の第9slotへ複製
 
 注意:
   - 公開教師は再shuffleしません。

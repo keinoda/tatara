@@ -1,12 +1,12 @@
-# 公開教師データによる legacy progress 係数校正と 8 routing / 9-slot LayerStack 学習計画
+# 公開教師データによるprogress係数校正とfixed8 LayerStack学習計画
 
 ## 1. 目的
 
 Vast.ai の RTX 5090 1 枚で、SOJO が公開したシャッフル済み教師データを使い、
-`1024x16x64` の LayerStack NNUE を 10–20 epoch 学習する。networkは従来互換の9 slotを
-保持し、`keinoda/YaneuraOu` の legacy `progress.bin` を基礎にした局面進行度8分割で
-slot 0–7だけを選ぶ。slot 8は従来どおり未使用とし、既存エンジンと同じ`0.125`刻みを
-維持する。8-slot形式や新しいbinning形式は導入しない。
+`1024x16x64` の LayerStack NNUE を 10–20 epoch 学習する。本家Tataraの既存機能で8
+LayerStacksを学習し、`keinoda/YaneuraOu` のlegacy `progress.bin`を基礎にした局面進行度
+8分割でslot 0–7を選ぶ。YaneuraOu向け変換時だけbucket 7を未使用の第9slotへ複製し、
+既存エンジンと同じ9-slot形式と`0.125`刻みを維持する。新しいbinning形式は導入しない。
 
 SOJO 教師は局単位の並びと総手数を保持しないため、SOJO を教師信号にした進行度モデルの
 再学習は行わない。既存係数に対し、手数を使わない affine 校正だけで出力分布を広げられるか
@@ -38,7 +38,7 @@ SOJO 教師は局単位の並びと総手数を保持しないため、SOJO を�
 | validation dataset | `takaoyamaoka/floodgate.hcpe` |
 | validation PSV | 34,276,920 bytes、856,923 局面 |
 | network | LayerStack、FT 1024、L1 16、L2 64 |
-| LayerStack layout | 9 slot。progress routingではslot 0–7を使用し、slot 8は未使用 |
+| LayerStack layout | Tatara学習時8 bucket。YaneuraOu出力時9 slot（slot 8はbucket 7の複製で未使用） |
 | bucket routing | progressによる固定8分割、既存エンジンと同じ`0.125`刻み |
 | 学習量 | 最低 10 epoch、最大 20 epochを候補とし、途中の検証値で判断 |
 | 監視 | 学習と別プロセス、`0.0.0.0:6001` |
@@ -126,34 +126,24 @@ bucket 0を増やしたときのbucket 1–7への移動、飽和、順位保存
 と確認したが、本計画では利用しない。`progress.bin` に trailer を追加せず、YaneuraOu の
 binning 実装も変更しない。
 
-### 4.2 9-slot legacy routing と YaneuraOu 形式への変換
+### 4.2 本家8-bucket学習とYaneuraOu 9-slot形式への変換
 
-従来のTatara progress実装は、network layoutを9 slotのまま保持し、
-`min(7, floor(p * 8))`でslot 0–7だけを使っていた。現行Tatara `main`はcommit
-`2622e41`で`--num-buckets N`を一般化し、`N=9`では`floor(p * 9)`に変わってslot 8も
-学習する。一方、現行YaneuraOuの`progress8kpabs`は固定`0.125`境界のままであり、9
-LayerStacks buildでもslot 8を選ばない。そのため現行Tataraの`progress8kpabs + N=9`を
-そのまま使うとtrainerとengineのroutingが一致しない。
+現行Tatara `main`はcommit `2622e41`で`--num-buckets N`を一般化している。
+`--bucket-mode progress8kpabs --num-buckets 8`なら既存YaneuraOuと同じ
+`min(7, floor(p * 8))`になり、trainer、held-out validation、checkpoint、experiment JSONの
+全経路が本家実装だけで8 bucketとして整合する。`N=9`は`floor(p * 9)`でslot 8も選ぶため
+使用しない。学習器へ別routing modeを追加しない。
 
-既存動作を壊さない最小修正として、現行Tataraの可変N routingは変更せず、追加の
-`progress8kpabs-legacy9` modeを実装する。このmodeは`--num-buckets 9`だけを受理し、
-bucket indexを固定`min(7, floor(p * 8))`で計算する。training、held-out validation、
-eval、resume checkpoint、experiment JSONの全経路で同じmodeを記録・使用し、slot 8の
-gradientとoptimizer stateが更新されないことをtestする。名称は実装時にCLI helpと
-checkpoint互換性を確認して最終固定するが、別名へ暗黙fallbackしない。
-
-現行`net_to_yo`は9 LayerStacksに限ればfeature setとFT/L1/L2次元をheaderから自動検出
-するため、`1024x16x64`のweight layout自体には既に対応している。不足しているのは
-`--assume-kingrank9`しかなく、9-slot progress netであることを正しく表明できない点である。
-converterは次の最小差分に限定する。
+現行`net_to_yo`はYaneuraOuの9 LayerStacksだけを受理するため、8-bucket学習成果物との
+境界だけを拡張する。converterの差分は次に限定する。
 
 1. `--assume-progress8kpabs`を`--assume-kingrank9`と排他的に追加する。
-2. progress assertionは入力がexactly 9 slotであることを要求する。
-3. 次元検出、量子化、9-slot loop、YaneuraOu共通writer、hash、binary layoutは変更しない。
-4. `nnue-train --output-format yaneuraou`と`net_from_yo`は今回の経路で使わず、変更しない。
-5. 既存KingRank9の変換結果がbyte一致するregression testを維持する。
-6. `1024x16x64 / 9-slot` fixtureを追加し、期待architecture文字列、input全消費、slot数、
-   非zero weightの順序と出力再現性を検証する。
+2. KingRank9 assertionは入力9 bucket、progress assertionは入力8 bucketだけを受理する。
+3. progress変換ではbucket 0–7を変更せず、bucket 7をslot 8へ複製して9-slot writerへ渡す。
+4. 共有FT・factorizer、量子化、YaneuraOu writer、hash、binary layoutは変更しない。
+5. `nnue-train --output-format yaneuraou`と`net_from_yo`は今回の経路で使わず、変更しない。
+6. 既存KingRank9経路の出力を維持し、8→9補完の各tensorと入力全消費をtestする。
+7. `1024x16x64 / 9-slot`の期待architecture文字列をfixtureで検証する。
 
 YaneuraOu側は既に9 LayerStacks + progress routingを受理する。ローカル
 `master@66bef215`の関連実装は`origin/master@771fe811`と同一で、対応build keyは
@@ -161,9 +151,9 @@ YaneuraOu側は既に9 LayerStacks + progress routingを受理する。ローカ
 shortcut 1次元を除いたYaneuraOu表記であり、network shapeの変更ではない。実行時は
 `LS_BUCKET_MODE=progress8kpabs`と同一legacy `progress.bin`を指定する。
 
-本学習前に、Tatara legacy modeとYaneuraOuが固定局面および境界近傍で同じ0–7を返し、
-slot 8を一度も返さないことをend-to-endで確認する。8-slot net、progress trailer、
-writer format変更は行わない。
+本学習前に、TataraのN=8 routingとYaneuraOuが固定局面および境界近傍で同じ0–7を返し、
+YaneuraOuがslot 8を一度も返さないことをend-to-endで確認する。progress trailerや
+YaneuraOu writer形式の変更は行わない。
 
 ### 4.3 現行 `onstart.sh`
 
@@ -270,7 +260,7 @@ NNUE Lab の公開 experiment
 | GPU最適化 | `--all-optim` | 基準 run と同じ |
 | validation | `floodgate.psv`、856,923局面 | 基準 run と同じ |
 | dataloader threads | `30` を初期値 | 基準 run と同じ。Vast CPUでpreflight確認 |
-| checkpoint | `--save-rate 20 --keep-checkpoints 2` | 基準 run と同じ |
+| checkpoint | `--save-rate 20 --keep-checkpoints 2` | 基準 run と同じ。raw resume用は直近2本、量子化`.bin`は全て保持 |
 | score drop / clamp | 指定なし | 基準 run と同じ |
 | FV_SCALE | `28` | 基準 run と同じ。export/engine試験で明示確認 |
 
@@ -285,14 +275,14 @@ Tatara の無指定既定値ではなく基準 run に合わせた明示的選�
 | batch size | `16384` | `65536` | ユーザー指定 |
 | optimizer更新数 | 約488,285 update/epoch | 約223,830 update/epoch | batch sizeを4倍にした結果 |
 | architecture | `1536x16x32` | `1024x16x64` | ユーザー指定 |
-| bucket | KingRank9 9 routing | legacy progress 8 routing / 9 slot（slot 8未使用） | 既存配布形式とYaneuraOu互換を維持 |
+| bucket | KingRank9 9 routing | progress 8-bucket学習 / 9-slot export | 既存routingとYaneuraOu形式を維持 |
 | progress | 不使用 | `keinoda/YaneuraOu` 基準の legacy `progress.bin` | progress routingに必要 |
 | 学習量 | 160 SB、約2 epoch | 初回367 SB、約10 epoch。最大733 SB | ユーザー指定 |
 | LR schedule | step、`gamma=0.992, step=1` | 同じstep規則を10–20 epochまで継続 | NNUE Labに表示されるTatara標準設定をそのまま使用 |
 | validation頻度 | 毎SB、約80回/epoch | 毎SB、約36.7回/epoch | 1 SBの局面数が4倍 |
 | checkpoint実効間隔 | 20 SB、約0.25 epoch | 20 SB、約0.545 epoch | flagは同じだが1 SBの局面数が4倍 |
 | Tatara revision | generator `0.5.0`、`bfed43d-dirty` | official `main@da3ea68d` | current upstream exact commitを使用 |
-| export | KingRank9 assertion付き9-slot converter | 9-slot writerは再利用しprogress assertionだけ追加 | 形式変更を避ける最小差分 |
+| export | KingRank9 assertion付き9-slot converter | progress 8 bucketを明示確認し、bucket 7を第9slotへ複製 | 学習器本体を変更せず既存9-slot形式へ接続 |
 
 教師、architecture、bucket、学習量は意図した差である。LRは基準runと同じ
 `start=0.000875, gamma=0.992, step=1`を学習終了まで継続する。それ以外の学習
@@ -343,8 +333,8 @@ Tatara の無指定既定値ではなく基準 run に合わせた明示的選�
   --l1 16 \
   --l2 64 \
   --fv-scale 28 \
-  --bucket-mode progress8kpabs-legacy9 \
-  --num-buckets 9 \
+  --bucket-mode progress8kpabs \
+  --num-buckets 8 \
   --progress-coeff "$LEGACY_PROGRESS_BIN"
 ```
 
@@ -359,7 +349,8 @@ Gitから取得したこの学習専用folder自身を`EXPERIMENT_ROOT`とする
 
 ```text
 <EXPERIMENT_ROOT>/
-├── PLAN.md
+├── docs/experiments/progress-legacy9-1024x16x64/PLAN.md
+├── scripts/experiments/progress-legacy9-1024x16x64/run-training.sh
 ├── data/
 │   ├── training/             # 完成済みshardと連結PSV
 │   └── validation/           # floodgate PSV
@@ -371,10 +362,7 @@ Gitから取得したこの学習専用folder自身を`EXPERIMENT_ROOT`とする
 └── runs/<RUN_NAME>/
     ├── config/
     │   ├── command.txt
-    │   ├── environment.txt
-    │   ├── git-revisions.txt
-    │   ├── dataset-manifest.txt
-    │   └── progress-manifest.txt
+    │   └── manifest.txt
     ├── checkpoints/
     │   └── experiments/<experiment-id>.json
     ├── logs/
@@ -389,8 +377,8 @@ Gitから取得したこの学習専用folder自身を`EXPERIMENT_ROOT`とする
         └── manifest.txt
 ```
 
-`environment.txt` は秘密情報や環境変数の全 dump を保存せず、CUDA、driver、GPU、
-Rust、Tatara commit、実行引数など再現に必要な非機密情報だけを allow-list で記録する。
+`manifest.txt` は秘密情報や環境変数の全 dump を保存せず、GPU、Rust、Tatara commit、
+入力path・bytes、progress SHA-256など再現に必要な非機密情報だけをallow-listで記録する。
 
 ### 8.1 環境変数
 
@@ -409,7 +397,7 @@ Rust、Tatara commit、実行引数など再現に必要な非機密情報だけ
 | `BACKUP_REMOTE` / `RCLONE_CONFIG` | no | 手動Google Drive backup実行時だけ一時的に渡す。常駐設定にしない |
 
 `BATCH_SIZE=65536`、`BATCHES_PER_SUPERBATCH=6104`、`TARGET_SB=367`、LR、network
-dimensions、9-slot / 固定8 routingはこのrunの再現性contractであり、任意の環境変数
+dimensions、8-bucket学習 / 9-slot exportはこのrunの再現性contractであり、任意の環境変数
 上書き対象にしない。
 Vast.ai API key、GitHub token、SSH秘密鍵はcontainer内へ渡さない。`HF_TOKEN`を使う場合は
 Vast.aiのinstance環境へsecretとして設定し、shell tracingを無効にしてから取得処理だけへ渡す。
@@ -492,8 +480,8 @@ secretとして渡す。
 ### T3: CPU/GPU smoke
 
 1. ごく小さい独立 sample と別 output directory で 3 batch / 1 superbatch を実行する。
-2. `1024x16x64`、9 slot、固定8 bucket、legacy`0.125`routingの実効設定を起動ログで
-   確認し、bucket histogramのslot 8が0件であることを確認する。
+2. `1024x16x64`、`--num-buckets 8`、legacy`0.125`routingの実効設定を起動ログで
+   確認し、bucket histogramがbucket 0–7だけであることを確認する。
 3. loss、test loss、LR、active feature、FP16 clamp が有限値であることを確認する。
 4. `--all-optim` の有無だけを変えた短い比較で、loss挙動と pos/s を記録する。
 5. CPU thread 数は同一 sample で比較し、GPU starvation がなく最も安定する値を選ぶ。
@@ -508,7 +496,7 @@ secretとして渡す。
 
 ### T5: export / engine end-to-end
 
-1. 試験checkpointを9-slot、`1024x16x64`のYaneuraOu networkへ変換する。converterには
+1. 8-bucketの試験checkpointを9-slot、`1024x16x64`のYaneuraOu networkへ変換する。converterには
    `--assume-progress8kpabs`を明示し、KingRank9として偽装しない。
 2. 変換 manifest に converter commit、入力 checkpoint、出力 SHA-256、dimensions、
    bucket mode、legacy progress SHA-256を記録する。
@@ -516,8 +504,8 @@ secretとして渡す。
    実行する。分位点対応 branch は要求しない。
 4. 同一のlegacy `progress.bin`と`0.125`刻みで、Tatara surveyとYaneuraOuが同じ
    bucket 0–7を返すことを、通常局面と7境界の前後で照合する。
-5. Tatara training / validation / evalとYaneuraOuのいずれもslot 8を返さないこと、
-   smoke checkpointでslot 8のweight・optimizer stateが初期値から更新されないことを確認する。
+5. Tatara training / validationがbucket 0–7だけを返し、変換後のslot 0–7が入力と同じ順序、
+   slot 8がbucket 7の複製であること、YaneuraOuのprogress routingがslot 8を返さないことを確認する。
 6. 既存KingRank9 fixtureのconverter出力が変更前とbyte一致することを確認する。
 
 ### T6: monitor acceptance
@@ -629,14 +617,13 @@ bytes / SHA-256または`rclone check`を照合する。設定内容をlog、man
 
 networkは`1024x16x64`で確定した。preflight実装は次の順序で行う。
 
-1. `progress8kpabs-legacy9`の追加routingとCPU test
-2. training / validation / eval / resume / experiment JSONへのmode伝播test
-3. `net_to_yo --assume-progress8kpabs`の最小追加と既存KingRank9 byte regression test
-4. `1024x16x64 / 9-slot` converter fixtureとYaneuraOu `ls9` build/load test
-5. download済みSOJO shardによる400万局面surveyと候補提示
-6. ユーザーによる`progress.bin`候補の採否
-7. GPU smoke、resume drill、monitor acceptance
-8. 初回10 epoch本学習
+1. 本家`progress8kpabs --num-buckets 8`のtraining / validation / resume / experiment JSON回帰test
+2. `net_to_yo --assume-progress8kpabs`の8→9補完と既存KingRank9回帰test
+3. `1024x16x64 / 9-slot` converter fixtureとYaneuraOu `ls9` build/load test
+4. download済み公開教師shardによる400万局面surveyと候補提示
+5. ユーザーによる`progress.bin`候補の採否
+6. GPU smoke、resume drill、monitor acceptance
+7. 初回10 epoch本学習
 
-各gateが失敗した場合は後段へ進まない。特に5–6が完了するまで本学習を開始せず、
-8-slot形式、slot 8の学習、分位点trailerへ自動で切り替えない。
+各gateが失敗した場合は後段へ進まない。特に4–5が完了するまで本学習を開始せず、
+9-bucket routing、slot 8の学習、分位点trailerへ自動で切り替えない。
