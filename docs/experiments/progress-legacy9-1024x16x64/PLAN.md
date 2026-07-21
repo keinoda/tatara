@@ -42,6 +42,7 @@ SOJO 教師は局単位の並びと総手数を保持しないため、SOJO を�
 | bucket routing | progressによる固定8分割、既存エンジンと同じ`0.125`刻み |
 | 学習量 | 最低 10 epoch、最大 20 epochを候補とし、途中の検証値で判断 |
 | 監視 | 学習と別プロセス、`0.0.0.0:6001` |
+| Vast.ai volume | 最低1.3 TB。30 shardと連結PSVを同時保持するため、500 GBでは不足 |
 
 公開情報の参照先:
 
@@ -166,10 +167,16 @@ writer format変更は行わない。
 
 ### 4.3 現行 `onstart.sh`
 
-現行 `onstart.sh` が生成する既存run scriptは `1536x16x32`、KingRank9、
-160 superbatch 用であり、この実験には使用しない。データ取得と build の部分は再利用
-候補だが、この計画書を追加する commit では `onstart.sh` を変更・追跡しない。
-実装は 14 節の gate に従い、legacy9 routing と converter の検証後に別 commit で行う。
+repository rootの`onstart.sh`は、この学習専用branchを
+`/workspace/progress-legacy9-1024x16x64-training`へclone / ff-only pullし、official
+`upstream/main`を設定してbranchが最新upstreamを含むことを検証する。公開教師30 shard、
+floodgate、固定commitのbaseline `progress.bin`を取得し、Tataraと変換器、rshogiの変換toolを
+buildする。教師shardは再shuffleせずファイル名順に連結する。
+
+`onstart.sh`は本学習を開始せず、baseline係数も自動採用しない。準備完了後も、400万局面
+survey、候補提示、ユーザーによる係数選択、GPU smoke、変換・engine試験を順に通す。
+運用directory・環境変数・run名には教師公開元の固有名を使わず、出典として必要な箇所だけ
+dataset名と公開資料名を記録する。
 
 ## 5. 学習量の換算
 
@@ -206,39 +213,40 @@ Tatara の既存 dataloader がファイル終端から先頭へ循環する通�
 
 ## 6. 学習率
 
-NNUE Lab の基準 run は `8.75e-4` から始め、Tatara 既定の step schedule
-`gamma=0.992, step=1` を160 superbatch使う。SB160で実際に使われる LR は
-`8.75e-4 * 0.992^159 = 2.4398544857e-4`、初期値の `0.2788405126` 倍である。
-
-標準の減衰率を変えずにstep scheduleを367 SBへ延ばした場合、SB367のLRは
-`8.75e-4 * 0.992^366 = 4.6267929105e-5`、初期値の約5.29%になる。今回はこの10 epoch
-終端値を維持しつつ、Tataraが標準でサポートする滑らかな`exponential` scheduleで
-SB367まで減衰させる。
+NNUE Lab の基準 run に表示される
+`start 0.000875 gamma 0.992 drop every 1 superbatches`をそのまま使う。これはTatara
+既定の`StepLR`であり、CLIでは次に対応する。
 
 ```text
 --lr 8.75e-4
---lr-schedule exponential
---lr-final 4.6267929105e-5
---lr-final-superbatch 367
+--lr-schedule step
+--lr-gamma 0.992
+--lr-step 1
 ```
 
-Tataraの実装は`lr(sb) = initial * (final/initial)^(sb/horizon)`である。SB1から補間が
-進むため、1 SBあたりの実効倍率は`0.9920217112`となるが、SB367の終端は標準stepと
-一致する。実効値は次のとおり。
+superbatchを1始まりとすると、`lr(sb) = 8.75e-4 * 0.992^(sb-1)`である。160 SBの
+公開runだけで減衰率を再調整せず、同じ規則を367 SB、その後の手動resumeでも継続する。
+1 SBごとに0.8%ずつ下がるため、大きな段差を追加せず10–20 epoch全体で細かく減衰する。
+実効値は次のとおり。
 
 | 点 | SB | LR |
 |---|---:|---:|
-| 開始 | 1 | 8.6801900e-4 |
-| 約1 epoch | 37 | 6.5056637e-4 |
-| 約2 epoch | 73 | 4.8758909e-4 |
-| 約5 epoch | 183 | 2.0201493e-4 |
-| 約8 epoch | 293 | 8.3697590e-5 |
-| 約9 epoch | 330 | 6.2229528e-5 |
+| 開始 | 1 | 8.7500000e-4 |
+| 約1 epoch | 37 | 6.5528202e-4 |
+| 約2 epoch | 73 | 4.9073660e-4 |
+| 約5 epoch | 183 | 2.0283009e-4 |
+| 約8 epoch | 293 | 8.3833254e-5 |
+| 約9 epoch | 330 | 6.2279941e-5 |
 | 約10 epoch | 367 | 4.6267929e-5 |
+| 約12 epoch | 440 | 2.5741398e-5 |
+| 約14 epoch | 513 | 1.4321358e-5 |
+| 約16 epoch | 587 | 7.9040183e-6 |
+| 約18 epoch | 660 | 4.3974408e-6 |
+| 約20 epoch | 733 | 2.4465386e-6 |
 
-10 epoch以降の resume では `--lr-final-superbatch 367` を明示し、LRを
-`4.6267929105e-5` に保持する。raw checkpointにも horizon は保存されるが、CLIにも固定値を
-書いて再現性を二重に確認する。warmup、cosine、one-cycle、WDL taperは追加しない。
+10 epoch以降のresumeでも同じ`step / gamma=0.992 / step=1`を渡す。StepLRはhorizonを
+持たず、checkpointのsuperbatch番号から同じ式を再開する。LRをSB367で固定せず、延長中も
+標準の減衰を続ける。追加のwarmup、別の減衰方式、WDL taperは使わない。
 
 ## 7. 学習パラメータと基準 run との差分
 
@@ -280,15 +288,15 @@ Tatara の無指定既定値ではなく基準 run に合わせた明示的選�
 | bucket | KingRank9 9 routing | legacy progress 8 routing / 9 slot（slot 8未使用） | 既存配布形式とYaneuraOu互換を維持 |
 | progress | 不使用 | `keinoda/YaneuraOu` 基準の legacy `progress.bin` | progress routingに必要 |
 | 学習量 | 160 SB、約2 epoch | 初回367 SB、約10 epoch。最大733 SB | ユーザー指定 |
-| LR schedule | step、`gamma=0.992` | exponential、SB367で標準stepと同じLR | 標準減衰率を保って滑らかに下げる |
+| LR schedule | step、`gamma=0.992, step=1` | 同じstep規則を10–20 epochまで継続 | NNUE Labに表示されるTatara標準設定をそのまま使用 |
 | validation頻度 | 毎SB、約80回/epoch | 毎SB、約36.7回/epoch | 1 SBの局面数が4倍 |
 | checkpoint実効間隔 | 20 SB、約0.25 epoch | 20 SB、約0.545 epoch | flagは同じだが1 SBの局面数が4倍 |
 | Tatara revision | generator `0.5.0`、`bfed43d-dirty` | official `main@da3ea68d` | current upstream exact commitを使用 |
 | export | KingRank9 assertion付き9-slot converter | 9-slot writerは再利用しprogress assertionだけ追加 | 形式変更を避ける最小差分 |
 
-教師、architecture、bucket、学習量は意図した差である。LRは基準runの標準
-`gamma=0.992`を367 SBまで延長した終端値を使い、曲線形状だけをexponentialへ変える。
-それ以外の学習ハイパーパラメータは基準runと同じにする。
+教師、architecture、bucket、学習量は意図した差である。LRは基準runと同じ
+`start=0.000875, gamma=0.992, step=1`を学習終了まで継続する。それ以外の学習
+ハイパーパラメータも基準runと同じにする。
 
 ### 7.3 初回10 epochコマンド
 
@@ -302,9 +310,9 @@ Tatara の無指定既定値ではなく基準 run に合わせた明示的選�
   --batches-per-superbatch 6104 \
   --superbatches 367 \
   --lr 8.75e-4 \
-  --lr-schedule exponential \
-  --lr-final 4.6267929105e-5 \
-  --lr-final-superbatch 367 \
+  --lr-schedule step \
+  --lr-gamma 0.992 \
+  --lr-step 1 \
   --wdl 0.3333333 \
   --win-rate-model \
   --wrm-in-scaling 340 \
@@ -334,6 +342,7 @@ Tatara の無指定既定値ではなく基準 run に合わせた明示的選�
   --ft-out 1024 \
   --l1 16 \
   --l2 64 \
+  --fv-scale 28 \
   --bucket-mode progress8kpabs-legacy9 \
   --num-buckets 9 \
   --progress-coeff "$LEGACY_PROGRESS_BIN"
@@ -391,9 +400,10 @@ Rust、Tatara commit、実行引数など再現に必要な非機密情報だけ
 |---|---:|---|
 | `RUN_NAME` | yes | 新規run directory、tmux、experiment名。既存名との重複をpreflightで拒否 |
 | `EXPERIMENT_ROOT` | no | launcherのdirectoryから自動解決。明示値を渡す場合も同じpathとの一致を検証 |
-| `TRAIN_PSV` | yes | 公開教師30 shardを順番どおり連結したPSV |
-| `VALIDATION_PSV` | yes | floodgate held-out PSV |
+| `TRAIN_PSV` | no | 既定は`<EXPERIMENT_ROOT>/data/training/public-teacher.psv`。別pathを使う場合だけ明示 |
+| `VALIDATION_PSV` | no | 既定は`<EXPERIMENT_ROOT>/data/validation/floodgate.psv` |
 | `LEGACY_PROGRESS_BIN` | yes | survey後に確定した別名のlegacy係数path |
+| `TRAIN_THREADS` | no | 既定`30`。T3でVast CPUに合わせて確認 |
 | `MONITOR_PORT` | no | 既定`6001`。既存listenerがあれば自動変更せず失敗 |
 | `HF_TOKEN` | no | 公開dataset取得のrate limit対策時だけ。値をlog/manifestへ出さない |
 | `BACKUP_REMOTE` / `RCLONE_CONFIG` | no | 手動Google Drive backup実行時だけ一時的に渡す。常駐設定にしない |
@@ -403,6 +413,32 @@ dimensions、9-slot / 固定8 routingはこのrunの再現性contractであり�
 上書き対象にしない。
 Vast.ai API key、GitHub token、SSH秘密鍵はcontainer内へ渡さない。`HF_TOKEN`を使う場合は
 Vast.aiのinstance環境へsecretとして設定し、shell tracingを無効にしてから取得処理だけへ渡す。
+
+### 8.2 Vast.ai作成時の指定
+
+container imageは`ghcr.io/keinoda/shogi-lab:cuda129-trt1011`をそのまま使う。現時点では
+imageの変更を前提にせず、`onstart.sh`がCUDA、cuBLAS、LLVM/Clang、Rust、`hf`をpreflight
+する。不足が検出された場合は、その場で別方式へ差し替えずlogを確認してimage改訂を判断する。
+
+添付されていたinstance作成commandからは、古い`TATARA_BRANCH`環境変数を外し、500 GBの
+volumeを最低1.3 TBへ増やす。filesystem余裕を含め、初回は1.4 TBを推奨する。
+
+```bash
+vastai create instance <OFFER_ID> \
+  --image ghcr.io/keinoda/shogi-lab:cuda129-trt1011 \
+  --env '-p 6001:6001' \
+  --onstart-cmd "$(cat /path/to/Tatara/onstart.sh)" \
+  --disk 40 \
+  --create-volume <VOLUME_ASK_ID> \
+  --volume-size 1400 \
+  --mount-path /workspace \
+  --ssh \
+  --direct
+```
+
+通常は追加環境変数不要である。`/workspace`以外へvolumeをmountする場合だけ
+`WORKSPACE_ROOT`を指定する。公開HF datasetのrate limit対策が必要な場合だけ`HF_TOKEN`を
+secretとして渡す。
 
 ## 9. 事前試験
 
@@ -414,7 +450,9 @@ Vast.aiのinstance環境へsecretとして設定し、shell tracingを無効に�
 2. CUDA、cuBLAS、`llc-21` 以上、`clang-21` 以上、Rust toolchain を確認する。
 3. Tatara と CUDA kernel を exact commit から clean build する。
 4. `nnue-train --help` で使用予定 flag を機械的に確認する。
-5. image の不足が判明した場合だけ Docker image の変更案を作り、別 tag で build する。
+5. volumeの実空きが1.3 TB以上あり、30 shard 586,757,977,480 bytes、連結PSV同量、
+   build・checkpoint・一時書込み用100 GBを同時に保持できることを確認する。
+6. image の不足が判明した場合だけ Docker image の変更案を作り、別 tag で build する。
 
 ### T1: 入力の完全性
 
@@ -562,10 +600,10 @@ directory listingを無効にする。認証が必要なら Vast.ai 側の公開
 ### resume
 
 resume は raw `.ckpt` だけを使い、元 run と同じ architecture、feature set、legacy
-progress SHA-256、固定 `0.125` 境界、optimizer、loss、batch設定を渡す。
-延長先が `440 / 513 / 587 / 660 / 733` のいずれでも
-`--lr-final-superbatch 367` を明示し、checkpoint内の保存 horizon と一致させる。
-自動 resumeは行わず、checkpoint SHA-256と前回終了理由を確認してから手動実行する。
+progress SHA-256、固定 `0.125` 境界、optimizer、loss、batch設定と
+`--lr-schedule step --lr-gamma 0.992 --lr-step 1`を渡す。延長先が
+`440 / 513 / 587 / 660 / 733`のいずれでもsuperbatch番号に応じたStepLRを継続する。
+自動resumeは行わず、checkpoint SHA-256と前回終了理由を確認してから手動実行する。
 
 ## 13. backup
 
