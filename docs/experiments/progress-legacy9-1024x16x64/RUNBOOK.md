@@ -1,0 +1,223 @@
+# Vast.ai実行手順
+
+以下は課金前にlocalで確認し、Vast.aiでは上から順に実行する。`<...>`はoperatorが実値へ置き換える。
+既存file、checkout、run、tmuxをscriptが自動削除する手順はない。
+
+## 0. 課金前のlocal確認
+
+```bash
+cd /Users/keinoda/Documents/Tatara
+git switch codex/progress-legacy9-1024x16x64-training
+git status --short
+git fetch origin codex/progress-legacy9-1024x16x64-training
+git rev-parse HEAD
+git rev-parse origin/codex/progress-legacy9-1024x16x64-training
+```
+
+working treeがcleanで、最後の2 SHAが一致していることを確認する。この40桁SHAを
+`TATARA_COMMIT`とする。imageはdigest付き参照を使い、volumeは1400 GB、mount先は
+`/workspace`とする。
+
+## 1. Vast.ai作成commandを生成
+
+```bash
+cd /Users/keinoda/Documents/Tatara
+OFFER_ID=<OFFER_ID> \
+VOLUME_ASK_ID=<VOLUME_ASK_ID> \
+TATARA_COMMIT=<40桁SHA> \
+  scripts/experiments/progress-legacy9-1024x16x64/print-vast-create-command.sh \
+  > /tmp/tatara-vast-create-command.sh
+bash -n /tmp/tatara-vast-create-command.sh
+less /tmp/tatara-vast-create-command.sh
+```
+
+出力される`--onstart-cmd`は次のbootstrapだけで、`onstart.sh`本文は含まない。
+
+1. `/root/.no_auto_tmux`を作り、Vast.aiのlogin時自動tmuxを止める。
+2. 専用branchを`/workspace/progress-legacy9-1024x16x64-training`へcloneする。
+3. cloneしたbranch先端と`TATARA_COMMIT`が一致することを確認する。
+4. detached checkoutしたrepository内の`onstart.sh`を実行する。
+
+再起動時にclone先が既にあれば、origin・clean状態・HEADを検査し、すべて一致する場合だけ再利用する。
+`pull`、別revisionへのcheckout、既存directory削除は行わない。表示内容とoffer/volume IDを確認後、
+operatorが明示的に次を実行する。
+
+```bash
+bash /tmp/tatara-vast-create-command.sh
+```
+
+この操作だけがinstanceを作成する。generator script自体はinstanceを作成しない。
+
+## 2. onstart状態確認
+
+SSH接続後、自動tmuxに入らないことを確認する。
+
+```bash
+test -f /root/.no_auto_tmux
+cd /workspace/progress-legacy9-1024x16x64-training
+git status --short
+git rev-parse HEAD
+scripts/experiments/progress-legacy9-1024x16x64/onstart-status.sh
+tail -f /workspace/onstart.log
+```
+
+`onstart.sh`はTatara/rshogi build、30 shard download、validation download、progress.bin取得を
+別tmuxで開始する。依存step完了後、再shuffleせずPSVを連結する。本学習は自動開始しない。
+
+```bash
+tmux ls
+ls -la .onstart
+tail -f logs/onstart/download_training.log
+tail -f logs/onstart/prepare_data.log
+```
+
+T0/T1の完了条件は`.onstart/prepare_data.done`である。失敗markerがある場合はlogとartifactを
+調査し、原因を確定するまで次へ進まない。
+
+## 3. onstart失敗時の明示retry
+
+```bash
+RETRY_STEP=<失敗step> \
+CONFIRM_RETRY_STEP=<同じ失敗step> \
+  scripts/experiments/progress-legacy9-1024x16x64/retry-onstart-step.sh
+```
+
+`prepare_data`の生成途中PSVだけを除く必要がある場合に限り、同じcommandへ次を追加する。
+
+```bash
+CONFIRM_REMOVE_PARTIAL_PSV=/workspace/progress-legacy9-1024x16x64-training/data/training/public-teacher.psv.partial
+```
+
+このscriptは指定したfailed markerと、明示承認された生成途中PSV以外を削除しない。完成済みPSV、
+dataset、manifestは上書きしない。checksum不一致はtransient failureとしてretryしない。
+
+## 4. T2: 400万局面survey
+
+3 splitの件数は合計4,000,000として明示する。`AFFINE_CANDIDATES`は
+`name:a:b`を空白区切りで渡す。未指定ならbaseline分布だけを測り、候補を生成しない。
+
+```bash
+SURVEY_ID=<新しいsurvey名> \
+SURVEY_SEED=<0以上の整数> \
+CALIBRATION_SAMPLES=<件数> \
+SELECTION_SAMPLES=<件数> \
+FINAL_TEST_SAMPLES=<件数> \
+AFFINE_CANDIDATES='<候補名>:<a>:<b> <候補名>:<a>:<b>' \
+  scripts/experiments/progress-legacy9-1024x16x64/run-survey.sh
+```
+
+`survey/<SURVEY_ID>/metrics.json`をユーザーへ提示する。bucket 0だけでなくmigration、境界crossing、
+total variation、飽和、3 splitの差を確認する。採用候補を自動で決めない。
+
+```bash
+SURVEY_ID=<survey名> \
+CANDIDATE_NAME=<baselineまたは候補名> \
+APPROVAL_NOTE='<提示結果に基づく採否理由>' \
+  scripts/experiments/progress-legacy9-1024x16x64/approve-progress.sh
+```
+
+表示された承認manifestの絶対pathを以後の`PROGRESS_APPROVAL`に使う。
+
+## 5. T3: precision/thread smoke
+
+本学習で使う予定の新しい`RUN_NAME`をここから一貫して使う。
+
+```bash
+RUN_NAME=<新しいrun名> \
+PROGRESS_APPROVAL=<承認manifestの絶対path> \
+THREAD_CANDIDATES='16 30' \
+  scripts/experiments/progress-legacy9-1024x16x64/run-smoke.sh
+```
+
+`gates/<RUN_NAME>/smoke/report.json`を提示し、各runがcomplete、loss/test lossが有限、clampと
+throughputが妥当であることを比較する。scriptは選択しない。
+
+```bash
+RUN_NAME=<同じrun名> \
+TRAIN_PRECISION=<fp32またはall-optim> \
+TRAIN_THREADS=<比較済みthread数> \
+APPROVAL_NOTE='<採用理由>' \
+  scripts/experiments/progress-legacy9-1024x16x64/approve-smoke.sh
+```
+
+## 6. T4/T5: resumeとengine end-to-end
+
+```bash
+RUN_NAME=<同じrun名> \
+PROGRESS_APPROVAL=<承認manifest> \
+  scripts/experiments/progress-legacy9-1024x16x64/run-resume-drill.sh
+
+RUN_NAME=<同じrun名> \
+PROGRESS_APPROVAL=<承認manifest> \
+  scripts/experiments/progress-legacy9-1024x16x64/run-export-test.sh
+```
+
+T4はSB1 raw checkpointからSB2へoptimizer stateを含めてresumeする。T5は選択smoke networkを
+1024x16x64・9 slotへ変換し、固定YaneuraOuでstartposと7境界上下の14 fixtureを探索する。
+
+## 7. T6: monitor
+
+Vast.aiのport 6001 mapped URLを確認する。credentialはlogやmanifestへ保存しない。
+
+```bash
+RUN_NAME=<同じrun名> \
+MONITOR_USER=<user> \
+MONITOR_PASSWORD=<十分長いpassword> \
+MONITOR_PUBLIC_URL=<末尾slashなしのmapped URL> \
+  scripts/experiments/progress-legacy9-1024x16x64/run-monitor.sh
+```
+
+rendererとHTTP serverは別tmuxで動き、trainerへsignalやwriteを行わない。配信routeは`/`と
+`/status.json`だけで、未認証requestが401、localとmapped URLの認証済みreadbackが成功して
+`monitor.done`になる。
+
+## 8. 初回10 epoch学習
+
+```bash
+RUN_NAME=<同じrun名> \
+PROGRESS_APPROVAL=<承認manifest> \
+MONITOR_USER=<user> \
+MONITOR_PASSWORD=<password> \
+  scripts/experiments/progress-legacy9-1024x16x64/run-training.sh
+```
+
+起動直前に全gate、固定source、RTX 5090 1枚、教師・validation・progressのSHA-256、monitorを
+再検証する。成功時だけ`train-<RUN_NAME>` tmuxを作る。
+
+```bash
+tmux attach -t train-<RUN_NAME>
+tail -f runs/<RUN_NAME>/logs/train.log
+curl --user '<user>:<password>' http://127.0.0.1:6001/status.json
+```
+
+異常終了、NaN/inf、CUDA/Xid/OOM、I/O error、checksum不一致を検知しても自動resume・自動stopは
+しない。log、exit code、checkpointを保持し、ユーザーへ提示する。
+
+## 9. 保存済みcheckpointの比較と手動resume
+
+```bash
+python3 scripts/experiments/progress-legacy9-1024x16x64/select-saved-checkpoint.py \
+  --run-root runs/<親RUN_NAME>
+```
+
+報告だけで自動採用しない。延長承認後、新しいrun名とraw checkpointを指定する。
+
+```bash
+RUN_NAME=<新しいresume run名> \
+PARENT_RUN_NAME=<親run名> \
+RESUME_CHECKPOINT=<親run内のraw.ckpt絶対path> \
+TARGET_SB=<440|513|587|660|733> \
+PROGRESS_APPROVAL=<同じ承認manifest> \
+MONITOR_USER=<user> \
+MONITOR_PASSWORD=<password> \
+  scripts/experiments/progress-legacy9-1024x16x64/resume-training.sh
+```
+
+resume runにも先に同じ`RUN_NAME`でmonitor gateを作る。親runが正常終了し、checkpoint、教師、
+validation、progressが親manifestと一致する場合だけ別runとして開始する。
+
+## 10. backup
+
+自動backupはない。必要になった時だけ、ローカルの`rclone.conf`を一時的にinstanceへ置き、
+manifest、survey、log、選択checkpoint、変換後networkだけをinstanceからGoogle Driveへ直接copyする。
+実行前に転送元・転送先・一時config path・後処理を提示し、別途ユーザー承認を得る。
