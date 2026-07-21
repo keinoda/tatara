@@ -294,7 +294,7 @@ rshogi_revision=$(git -C "$RSHOGI_DIR" rev-parse HEAD)
 [[ "$rshogi_revision" == "$RSHOGI_COMMIT" ]] \
   || { echo "ERROR: rshogi checkoutのcommitが固定値と異なります" >&2; exit 1; }
 cd "$RSHOGI_DIR"
-cargo build --release -p tools --no-default-features --bin hcpe_to_psv --bin psv_to_jsonl
+cargo build --release -p tools --no-default-features --features nnue-arch --bin hcpe_to_psv --bin psv_to_jsonl
 STEP
 start_step build_rshogi "$build_rshogi_body"
 
