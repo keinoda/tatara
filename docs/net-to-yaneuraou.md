@@ -1,6 +1,6 @@
 # tatara ↔ YaneuraOu LayerStack net 変換
 
-9 bucket LayerStack net を tatara と YaneuraOu SFNN の間で相互変換する 2 つのツール:
+LayerStack net を tatara と YaneuraOu SFNN の間で相互変換する 2 つのツール:
 `net_to_yo` (tatara → YaneuraOu) と `net_from_yo` (YaneuraOu → tatara)。どちらも
 feature set と FT 出力 / 隠れ層の次元を入力の `arch_str` から自動検出するため、
 追加の指定は要らない。対応 feature set / 次元とファイル形式は両ツール共通で、以下の
@@ -8,7 +8,7 @@ feature set と FT 出力 / 隠れ層の次元を入力の `arch_str` から自�
 
 ## `net_to_yo` — tatara → YaneuraOu
 
-tatara の 9 bucket LayerStack `.bin` を YaneuraOu の SFNN 評価ファイルへ変換する。
+tatara の LayerStack `.bin` を YaneuraOu の9-slot SFNN評価ファイルへ変換する。
 
 ```bash
 cargo run --release -p net-to-yo -- \
@@ -17,8 +17,8 @@ cargo run --release -p net-to-yo -- \
   --assume-kingrank9
 ```
 
-9 slotのまま固定8分割を使うprogress netでは、学習時の
-`--bucket-mode progress8kpabs-legacy9`を確認して次のように変換する。
+固定8分割のprogress netでは、学習時に本家Tataraの
+`--bucket-mode progress8kpabs --num-buckets 8`を使ったことを確認して変換する。
 
 ```bash
 cargo run --release -p net-to-yo -- \
@@ -28,8 +28,10 @@ cargo run --release -p net-to-yo -- \
 ```
 
 量子化`.bin`はrouting規則を記録しないため、2つの`--assume-*` flagのどちらか一方を
-必ず指定する。両方の同時指定も拒否する。flagは確認済みの学習設定を明示するだけで、
-weightの順序や出力binaryは変更しない。
+必ず指定する。両方の同時指定も拒否する。`--assume-kingrank9`は9 bucket入力をそのまま
+変換する。`--assume-progress8kpabs`は8 bucket入力だけを受理し、bucket 0–7を保持したまま
+bucket 7を未使用の第9slotへ複製する。既存YaneuraOuのprogress routingは0–7だけを選ぶため、
+補完したslot 8は評価に使われない。
 
 ## `nnue-train` から直接出力
 
@@ -100,11 +102,12 @@ FT 出力次元 (`ft_out`)・L1 出力 (`l1_out`)・L2 出力 (`l2_out`) は任�
 YaneuraOu SFNN に受け皿が無いため、次を含む `.bin` は明示的にエラーにする。
 
 - PSQT / Threat / EffectBucket block を持つ net (`arch_str` に該当トークンがある)
-- 9 以外の LayerStack 数
+- `--assume-kingrank9`で9以外、または`--assume-progress8kpabs`で8以外のLayerStack数
 
 量子化 `.bin` は bucket routing mode を記録しないため、変換前に学習時の
-`--bucket-mode kingrank9`または`progress8kpabs-legacy9`を確認し、それぞれ
-`--assume-kingrank9`または`--assume-progress8kpabs`で明示する。可変N版
+`--bucket-mode kingrank9 --num-buckets 9`または
+`--bucket-mode progress8kpabs --num-buckets 8`を確認し、それぞれ
+`--assume-kingrank9`または`--assume-progress8kpabs`で明示する。
 `progress8kpabs --num-buckets 9`は`floor(p * 9)`でslot 8も選ぶため、固定`0.125`境界の
 既存YaneuraOu progress routingとは一致せず、このassertionの対象にしない。
 

@@ -12,7 +12,7 @@ const YO_TOP_HASH: u32 = 0x3c20_3b32;
 const YO_FT_HASH: u32 = 0x5f13_4ab8;
 const YO_NETWORK_HASH: u32 = 0x6333_718a;
 
-/// YaneuraOu SFNN が要求する KingRank9 LayerStack 数。
+/// YaneuraOu SFNN形式が格納するLayerStack数。routing規則はbinaryに含まれない。
 pub const YANEURAOU_LAYER_STACKS: usize = 9;
 
 const MAX_FT_OUT: usize = 8192;
@@ -55,9 +55,9 @@ const YO_FEATURES: [YoFeature; 5] = [
 /// LayerStack weights を YaneuraOu SFNNWithoutPsqt 形式で書き出す。
 ///
 /// feature set と各層次元は weights の shape から決定する。YaneuraOu SFNN が
-/// 表現できない拡張 feature、PSQT、KingRank9 以外の bucket 数は reject する。
+/// 表現できない拡張 feature、PSQT、9以外のbucket数はrejectする。
 /// bucket routing mode 自体は weights に含まれないため、caller は学習 config 等から
-/// KingRank9 であることを確認してから呼ぶ必要がある。
+/// routingと9 stackの対応が正しいことを確認してから呼ぶ必要がある。
 pub fn save_yaneuraou<W: Write>(writer: &mut W, weights: &LayerStackWeights) -> io::Result<()> {
     let arch = architecture(weights)?;
     validate_weights(&arch, weights)?;
@@ -131,7 +131,7 @@ fn architecture(weights: &LayerStackWeights) -> io::Result<Architecture> {
     let num_buckets = weights.num_buckets;
     if num_buckets != YANEURAOU_LAYER_STACKS {
         return invalid_input(format!(
-            "YaneuraOu SFNN requires {} LayerStacks (KingRank9), but weights have {num_buckets} buckets",
+            "YaneuraOu SFNN requires {} LayerStacks, but weights have {num_buckets} buckets",
             YANEURAOU_LAYER_STACKS
         ));
     }
@@ -378,10 +378,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_kingrank9_shape() {
+    fn rejects_non_nine_stack_shape() {
         let weights = LayerStackWeights::zeroed(FeatureSet::HalfKaHmMerged.spec(), 128, 16, 32, 8);
         let error = save_yaneuraou(&mut Vec::new(), &weights).unwrap_err();
-        assert!(error.to_string().contains("KingRank9"), "{error}");
+        assert!(error.to_string().contains("9 LayerStacks"), "{error}");
     }
 
     #[test]

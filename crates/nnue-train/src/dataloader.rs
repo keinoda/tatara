@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
-use shogi_features::{FeatureSetSpec, KINGRANK9_NUM_BUCKETS, kingrank9_bucket_board};
+use shogi_features::{FeatureSetSpec, kingrank9_bucket_board};
 use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, ShogiBoard};
 
 /// PSV record size in bytes (`shogi_format::PackedSfenValue` is a fixed
@@ -79,8 +79,6 @@ pub enum BucketMode {
     /// KP-absolute progress 推定値を `num_buckets` 等分する。
     #[default]
     Progress8KpAbs,
-    /// 9-slot layoutを維持しつつ、従来互換の固定8分割でslot 0..=7だけを使う。
-    Progress8KpAbsLegacy9,
     /// 双方の玉段を手番視点に正規化した固定 9 bucket を使う。
     KingRank9,
 }
@@ -90,14 +88,8 @@ impl BucketMode {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::Progress8KpAbs => "progress8kpabs",
-            Self::Progress8KpAbsLegacy9 => "progress8kpabs-legacy9",
             Self::KingRank9 => "kingrank9",
         }
-    }
-
-    /// 外部progress係数を使うmodeか。
-    pub const fn uses_progress_coeff(self) -> bool {
-        matches!(self, Self::Progress8KpAbs | Self::Progress8KpAbsLegacy9)
     }
 
     /// decode 済み局面の bucket index を返す。
@@ -105,13 +97,6 @@ impl BucketMode {
     pub fn bucket_board(self, board: &ShogiBoard, num_buckets: usize) -> u8 {
         match self {
             Self::Progress8KpAbs => ShogiProgressKPAbs.bucket_board(board, num_buckets),
-            Self::Progress8KpAbsLegacy9 => {
-                assert_eq!(
-                    num_buckets, KINGRANK9_NUM_BUCKETS,
-                    "progress8kpabs-legacy9 requires a 9-slot layout"
-                );
-                ShogiProgressKPAbs.bucket_board(board, 8)
-            }
             Self::KingRank9 => kingrank9_bucket_board(board),
         }
     }
@@ -690,10 +675,9 @@ impl BucketedPrefetchedLoader {
     /// 出ない)。`score_drop_abs` が `Some(t)` なら `|score| >= t` を skip。
     /// `score_clamp_abs` が `Some(c)` なら drop を生き残った position の score を
     /// `[-c, c]` に飽和させる (`--score-clamp-abs`)。
-    /// `bucket_mode` は output bucket の算出方式。progress系modeの重みは
+    /// `bucket_mode` は output bucket の算出方式。`Progress8KpAbs` の重みは
     /// process-global なので呼び出し前に `ShogiProgressKPAbs::load_from_bin` 済で
-    /// あること、未ロードなら全 bucket 4。legacy9は9-slot layoutのslot 0..=7だけを
-    /// 使う。`KingRank9` は外部重みを参照しない。
+    /// あること、未ロードなら全 bucket 4。`KingRank9` は外部重みを参照しない。
     /// `feature_set` は sparse index 化に使う feature set spec で、全 worker が共有する。
     /// `num_buckets` は progress mode の bucket 数。`compute_bucket = false` (Simple アーキ) では bucket
     /// 計算自体が skip されるが、worker 側 assertion (`num_buckets >= 1`) は常に
@@ -1580,34 +1564,6 @@ mod tests {
         assert_eq!(batch.n_positions, 16);
         assert_eq!(buckets, expected);
         assert!(buckets.iter().all(|&bucket| (0..9).contains(&bucket)));
-        loader.recycle((batch, buckets));
-    }
-
-    #[test]
-    fn bucketed_loader_legacy9_never_emits_slot8() {
-        let path = sample_psv_path();
-        let end = full_range_end(&path);
-        let mut loader = BucketedPrefetchedLoader::spawn(
-            &path,
-            16,
-            None,
-            None,
-            1,
-            BucketMode::Progress8KpAbsLegacy9,
-            test_spec(),
-            true,
-            9,
-            end,
-            false,
-        )
-        .expect("spawn legacy9 loader");
-        let (batch, buckets) = loader
-            .next_batch()
-            .expect("load batch")
-            .expect("full batch");
-        assert_eq!(batch.n_positions, 16);
-        assert!(buckets.iter().all(|&bucket| (0..8).contains(&bucket)));
-        assert!(buckets.iter().all(|&bucket| bucket != 8));
         loader.recycle((batch, buckets));
     }
 
