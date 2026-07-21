@@ -106,6 +106,7 @@ def render_line_chart(
     title: str,
     series: tuple[tuple[str, str, str], ...],
     percent: bool = False,
+    independent_series_scales: bool = False,
 ) -> str:
     plotted = [
         (label, color, history_points(history, key)) for label, key, color in series
@@ -120,26 +121,35 @@ def render_line_chart(
 
     width = 900.0
     height = 320.0
-    left = 82.0
-    right = 24.0
+    left = 110.0
+    use_independent_scales = independent_series_scales and len(plotted) == 2
+    right = 110.0 if use_independent_scales else 24.0
     top = 22.0
     bottom = 48.0
     plot_width = width - left - right
     plot_height = height - top - bottom
     x_values = [x for _, _, points in plotted for x, _ in points]
-    y_values = [y for _, _, points in plotted for _, y in points]
     x_low = min(x_values)
     x_high = max(x_values)
     x_ticks = chart_ticks(x_low, x_high) if x_low != x_high else [x_low]
     if x_low == x_high:
         x_low -= 0.5
         x_high += 0.5
-    y_low, y_high = chart_range(y_values, bounded_ratio=percent)
+    if use_independent_scales:
+        y_ranges = [
+            chart_range([y for _, y in points], bounded_ratio=percent)
+            for _, _, points in plotted
+        ]
+    else:
+        y_values = [y for _, _, points in plotted for _, y in points]
+        shared_range = chart_range(y_values, bounded_ratio=percent)
+        y_ranges = [shared_range] * len(plotted)
 
     def x_position(value: float) -> float:
         return left + (value - x_low) / (x_high - x_low) * plot_width
 
-    def y_position(value: float) -> float:
+    def y_position(value: float, value_range: tuple[float, float]) -> float:
+        y_low, y_high = value_range
         return top + (y_high - value) / (y_high - y_low) * plot_height
 
     svg = [
@@ -148,16 +158,28 @@ def render_line_chart(
         f'<rect class="plot-background" x="{left:.1f}" y="{top:.1f}" '
         f'width="{plot_width:.1f}" height="{plot_height:.1f}" />',
     ]
-    for tick in chart_ticks(y_low, y_high):
-        y = y_position(tick)
+    left_ticks = chart_ticks(*y_ranges[0])
+    right_ticks = chart_ticks(*y_ranges[1]) if use_independent_scales else []
+    for index, tick in enumerate(left_ticks):
+        y = y_position(tick, y_ranges[0])
         svg.append(
             f'<line class="grid-line" x1="{left:.1f}" y1="{y:.2f}" '
             f'x2="{width - right:.1f}" y2="{y:.2f}" />'
         )
+        left_style = f' style="fill:{plotted[0][1]}"' if use_independent_scales else ""
         svg.append(
-            f'<text class="axis-tick" x="{left - 12:.1f}" y="{y + 4:.2f}" '
+            f'<text class="axis-tick" data-axis="left"{left_style} '
+            f'x="{left - 12:.1f}" y="{y + 4:.2f}" '
             f'text-anchor="end">{format_y_tick(tick, percent=percent)}</text>'
         )
+        if use_independent_scales:
+            right_tick = right_ticks[index]
+            svg.append(
+                f'<text class="axis-tick" data-axis="right" '
+                f'style="fill:{plotted[1][1]}" x="{width - right + 12:.1f}" '
+                f'y="{y + 4:.2f}" text-anchor="start">'
+                f'{format_y_tick(right_tick, percent=percent)}</text>'
+            )
     for tick in x_ticks:
         x = x_position(tick)
         svg.append(
@@ -172,9 +194,10 @@ def render_line_chart(
         f'<text class="axis-title" x="{left + plot_width / 2:.2f}" '
         f'y="{height - 2:.1f}" text-anchor="middle">superbatch</text>'
     )
-    for label, color, points in plotted:
+    for index, (label, color, points) in enumerate(plotted):
         coordinates = " ".join(
-            f"{x_position(x):.2f},{y_position(y):.2f}" for x, y in points
+            f"{x_position(x):.2f},{y_position(y, y_ranges[index]):.2f}"
+            for x, y in points
         )
         if len(points) > 1:
             svg.append(
@@ -184,14 +207,18 @@ def render_line_chart(
         last_x, last_y = points[-1]
         svg.append(
             f'<circle class="latest-point" cx="{x_position(last_x):.2f}" '
-            f'cy="{y_position(last_y):.2f}" r="5" fill="{color}" />'
+            f'cy="{y_position(last_y, y_ranges[index]):.2f}" r="5" fill="{color}" />'
         )
     svg.append("</svg>")
 
-    legend = "".join(
-        f'<span><i style="--series-color:{color}"></i>{html.escape(label)}</span>'
-        for label, color, _ in plotted
-    )
+    legend_parts = []
+    for index, (label, color, _) in enumerate(plotted):
+        if use_independent_scales:
+            label = f"{label}（{'左軸' if index == 0 else '右軸'}）"
+        legend_parts.append(
+            f'<span><i style="--series-color:{color}"></i>{html.escape(label)}</span>'
+        )
+    legend = "".join(legend_parts)
     return (
         f'<section class="chart-card" data-chart="{html.escape(chart_id)}">'
         f"<h2>{html.escape(title)}</h2>"
@@ -264,11 +291,12 @@ def render_html(status: dict[str, Any]) -> str:
     loss_chart = render_line_chart(
         history,
         chart_id="loss",
-        title="学習loss / test loss",
+        title="train / test loss（独立縮尺）",
         series=(
             ("train loss", "loss", "#2563eb"),
             ("test loss", "test_loss", "#dc2626"),
         ),
+        independent_series_scales=True,
     )
     accuracy_chart = render_line_chart(
         history,

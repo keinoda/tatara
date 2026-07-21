@@ -274,10 +274,10 @@ MONITOR_PUBLIC_URL=<末尾slashなしのmapped URL> \
 
 rendererとHTTP serverは別tmuxで動き、trainerへsignalやwriteを行わない。配信routeは`/`と
 `/status.json`だけで、未認証requestが401、localとmapped URLの認証済みreadbackが成功して
-`monitor.done`になる。HTMLは最新値の表に加えて、experiment JSONの全履歴からtrain lossと
-test lossを同じ尺度で描くグラフ、およびtest accuracyのグラフを表示する。描画は外部CDNや
-JavaScriptへ依存しないインラインSVGで、15秒ごとのsnapshot更新時に再生成する。`status.json`は
-最新値に加えて`history`も含む。
+`monitor.done`になる。HTMLは最新値の表に加えて、experiment JSONの全履歴からtrain lossを
+青の左軸、test lossを赤の右軸として独立した縮尺で同じグラフに描き、test accuracyを別の
+グラフに表示する。描画は外部CDNやJavaScriptへ依存しないインラインSVGで、15秒ごとの
+snapshot更新時に再生成する。`status.json`は最新値に加えて`history`も含む。
 
 ## 8. 初回10 epoch学習
 

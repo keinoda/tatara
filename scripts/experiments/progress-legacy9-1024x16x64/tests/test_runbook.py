@@ -330,7 +330,17 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             self.assertIn('data-chart="test-accuracy"', html)
             self.assertIn("train loss", html)
             self.assertIn("test loss", html)
+            self.assertIn("train loss（左軸）", html)
+            self.assertIn("test loss（右軸）", html)
+            self.assertEqual(html.count("<svg"), 2)
             self.assertIn("<polyline", html)
+            loss_chart = html.split('data-chart="loss"', 1)[1].split(
+                "</section>", 1
+            )[0]
+            self.assertIn('data-axis="left"', loss_chart)
+            self.assertIn('data-axis="right"', loss_chart)
+            self.assertIn("0.118", loss_chart)
+            self.assertIn("0.129", loss_chart)
             self.assertNotIn("<script", html)
             self.assertNotIn("MONITOR_PASSWORD", html)
 
