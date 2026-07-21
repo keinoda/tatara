@@ -92,7 +92,9 @@ tail -f /workspace/onstart.log
 ```
 
 `onstart.sh`はTatara/rshogi build、30 shard download、validation download、progress.bin取得を
-別tmuxで開始する。依存step完了後、再shuffleせずPSVを連結する。本学習は自動開始しない。
+別tmuxで開始する。rshogiのconverterは
+`--no-default-features --features nnue-arch`でbuildする。依存step完了後、再shuffleせずPSVを
+連結する。本学習は自動開始しない。
 
 ```bash
 tmux ls
@@ -148,25 +150,25 @@ APPROVAL_NOTE='<提示結果に基づく採否理由>' \
 
 表示された承認manifestの絶対pathを以後の`PROGRESS_APPROVAL`に使う。
 
-## 5. T3: precision/thread smoke
+## 5. T3: 固定precision/thread smoke
 
-本学習で使う予定の新しい`RUN_NAME`をここから一貫して使う。
+本学習で使う予定の新しい`RUN_NAME`をここから一貫して使う。precisionは`all-optim`、worker
+thread数はAMD Ryzen 9 9950Xの物理コア数に合わせた16で確定済みであり、候補比較は行わない。
 
 ```bash
 RUN_NAME=<新しいrun名> \
 PROGRESS_APPROVAL=<承認manifestの絶対path> \
-THREAD_CANDIDATES='16 30' \
   scripts/experiments/progress-legacy9-1024x16x64/run-smoke.sh
 ```
 
-`gates/<RUN_NAME>/smoke/report.json`を提示し、各runがcomplete、loss/test lossが有限、clampと
-throughputが妥当であることを比較する。scriptは選択しない。
+scriptは`all-optim-t16`を1回実行する。runがcomplete、loss/test loss/clamp metricが有限である
+ことを検証し、`gates/<RUN_NAME>/precision.approved.txt`へ固定値を記録して`smoke.done`と
+`precision.done`を作る。`smoke/report.json`のclampとthroughputは後続gateへ進む前に確認する。
+
+`approve-smoke.sh`は既存の手順との互換用で、固定値manifestをread-only確認する場合だけ使う。
 
 ```bash
 RUN_NAME=<同じrun名> \
-TRAIN_PRECISION=<fp32またはall-optim> \
-TRAIN_THREADS=<比較済みthread数> \
-APPROVAL_NOTE='<採用理由>' \
   scripts/experiments/progress-legacy9-1024x16x64/approve-smoke.sh
 ```
 

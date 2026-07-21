@@ -24,6 +24,8 @@ bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket
 | export | YaneuraOu 9 slot、slot 8はbucket 7の複製 |
 | batch size | 65,536 |
 | batches / superbatch | 6,104 |
+| precision | `--all-optim` |
+| worker threads | 16 |
 | 初回 | 367 superbatch、約10.0083 epoch |
 | LR | step、start 0.000875、gamma 0.992、every 1 superbatch |
 | loss | WRM、既存Tatara基準値を維持 |
@@ -31,8 +33,9 @@ bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket
 | backup | 自動実行しない |
 | recovery | 自動resume・自動再起動・自動stopを行わない |
 
-`--all-optim`とworker thread数はRTX 5090上のsmoke比較後にユーザーが選ぶ。disk上の教師順序は
-変えないが、workerが2以上ならoptimizerへ届く順序は非決定的であり、bit単位の再現性は持たない。
+precisionは`--all-optim`、worker thread数はAMD Ryzen 9 9950Xの物理コア数に合わせて16に固定する。
+T3ではこの組み合わせだけをsmoke実行し、選択や再承認は行わない。disk上の教師順序は変えないが、
+workerが2以上なのでoptimizerへ届く順序は非決定的であり、bit単位の再現性は持たない。
 
 ## 実行gate
 
@@ -41,7 +44,7 @@ bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket
 | T0 | 固定revision、image、RTX 5090、build | `onstart.sh` | `build_tatara.done`、`build_rshogi.done` |
 | T1 | 30 shard、連結PSV、validation、SHA-256 | `onstart.sh` | `prepare_data.done` |
 | T2 | 重複なし400万局面survey | `run-survey.sh` | `metrics.json`を提示し、`approve-progress.sh`で承認 |
-| T3 | fp32/all-optim、thread候補smoke | `run-smoke.sh` | `approve-smoke.sh`でprecision/threadを承認 |
+| T3 | all-optim、16 threadの固定smoke | `run-smoke.sh` | run完走・有限metricを検証し、固定値manifestを生成 |
 | T4 | raw checkpoint true resume | `run-resume-drill.sh` | SB1からSB2へのlineageとhistoryを検証 |
 | T5 | 8→9 export、YaneuraOu load/search | `run-export-test.sh` | startposと14境界fixtureが完走 |
 | T6 | 独立monitor、Basic認証、readback | `run-monitor.sh` | local/public readbackと未認証401 |
@@ -77,7 +80,7 @@ random I/Oを抑える。calibration・selection・final-testの件数とseedは
 - 教師の再shuffle
 - progressの再学習、手数や総手数の推測
 - 分位点table、trailer、9 bucket routing
-- gate結果に基づく係数・precision・thread数の自動採用
+- gate結果に基づく係数の自動採用
 - 学習中の自動stop、障害時の自動resume
 - 自動Google Drive backup
 
