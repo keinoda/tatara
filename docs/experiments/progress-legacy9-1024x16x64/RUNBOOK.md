@@ -106,6 +106,9 @@ tail -f logs/onstart/prepare_data.log
 T0/T1の完了条件は`.onstart/prepare_data.done`である。失敗markerがある場合はlogとartifactを
 調査し、原因を確定するまで次へ進まない。
 
+T2のsurveyだけはT1の完了を待たず、Tatara build・baseline progress.bin取得と、公開教師shard
+1個以上の取得完了後に開始できる。30 shard全部と連結PSVはT1以降のgateで確認する。
+
 ## 3. onstart失敗時の明示retry
 
 ```bash
@@ -125,17 +128,25 @@ dataset、manifestは上書きしない。checksum不一致はtransient failure�
 
 ## 4. T2: 400万局面survey
 
-3 splitの件数は合計4,000,000として明示する。`AFFINE_CANDIDATES`は
-`name:a:b`を空白区切りで渡す。未指定ならbaseline分布だけを測り、候補を生成しない。
+T1の完了を待たず、取得完了済みshardの合計が400万局面以上なら実行できる。scriptは開始時点の
+確定済み`.bin`だけを入力として固定し、実行中に追加で完了したshardを混ぜない。使用したfile・
+size・局面数は`survey/<SURVEY_ID>/input-shards.txt`へ記録する。`AFFINE_CANDIDATES`は
+`name:a:b`を空白区切りで渡し、未指定ならbaseline分布だけを測って候補を生成しない。
 
 ```bash
 SURVEY_ID=<新しいsurvey名> \
-SURVEY_SEED=<0以上の整数> \
-CALIBRATION_SAMPLES=<件数> \
-SELECTION_SAMPLES=<件数> \
-FINAL_TEST_SAMPLES=<件数> \
+SURVEY_SEED=20260721 \
+CALIBRATION_SAMPLES=2000000 \
+SELECTION_SAMPLES=1000000 \
+FINAL_TEST_SAMPLES=1000000 \
 AFFINE_CANDIDATES='<候補名>:<a>:<b> <候補名>:<a>:<b>' \
   scripts/experiments/progress-legacy9-1024x16x64/run-survey.sh
+```
+
+baseline提示後の候補比較は、新しいshardを混ぜず同じ母集団を使うため、上のcommandへ次を追加する。
+
+```bash
+SURVEY_INPUT_MANIFEST=survey/<baselineのSURVEY_ID>/input-shards.txt
 ```
 
 `survey/<SURVEY_ID>/metrics.json`をユーザーへ提示する。bucket 0だけでなくmigration、境界crossing、

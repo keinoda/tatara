@@ -21,6 +21,9 @@
 | LR | step 0.000875、gamma 0.992、step 1 | Tatara標準の減衰規則 |
 | precision | `--all-optim` | SH11235の公開運用例を踏まえたユーザー指定 |
 | worker threads | 16 | AMD Ryzen 9 9950Xの物理16コアに合わせる |
+| survey入力 | 開始時点の取得完了済み公開shardを固定 | 1 shard以上かつ合計400万局面以上。候補比較はbaselineの`SURVEY_INPUT_MANIFEST`を再利用 |
+| survey split | calibration 2,000,000、selection 1,000,000、final-test 1,000,000 | 合計400万局面 |
+| survey seed | `20260721` | 候補比較でも同じ入力snapshotとseedを使う |
 | survey | 明示したaffine候補だけを比較、採用はユーザー判断 | 自動探索・自動採用なし |
 | monitor | port 6001、Basic認証、2 routeだけ配信 | directory listingと無認証公開をしない |
 | checkpoint選択 | 保存済み`.bin`内の最小test lossを報告 | 自動採用しない |
@@ -31,8 +34,6 @@
 
 | 項目 | 決める時点 | 記録先 |
 |---|---|---|
-| survey 3 splitの配分 | Vast起動前またはT2実行前 | survey command / manifest |
-| survey seed | T2実行前 | survey manifest |
 | affine候補 `(name, a, b)` | baseline分布確認後 | survey metrics |
 | 使用progress.bin | 候補別の3 split結果を提示後 | `progress/approved/*.txt` |
 | `RUN_NAME` | 各run開始前 | run manifest |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 完成した公開教師shardから、明示候補だけを比較する再現可能surveyを実行する。
+# 取得完了済みの公開教師shardから、明示候補だけを比較する再現可能surveyを実行する。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -8,7 +8,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 validate_run_name "$SURVEY_ID"
 [[ -n "${SURVEY_SEED:-}" && "$SURVEY_SEED" =~ ^[0-9]+$ ]] \
   || fail "SURVEY_SEEDを0以上の整数で明示してください"
-[[ -f "$STATE_DIR/prepare_data.done" ]] || fail "prepare_data.doneがありません"
 [[ -x "$PROGRESS_SURVEY" ]] || fail "progress-bucket-surveyがありません: $PROGRESS_SURVEY"
 
 readonly SURVEY_DIR="$SURVEY_ROOT/$SURVEY_ID"
@@ -17,9 +16,46 @@ readonly SURVEY_DIR="$SURVEY_ROOT/$SURVEY_ID"
 readonly BASELINE_PROGRESS="$EXPERIMENT_ROOT/progress/baseline/progress.bin"
 require_exact_size "$BASELINE_PROGRESS" "$PROGRESS_EXPECTED_BYTES" "baseline progress.bin"
 
-shopt -s nullglob
-shards=("$TRAIN_SHARD_DIR"/dlsuisho_unique_*.bin)
-(( ${#shards[@]} == 30 )) || fail "公開教師shardは30個必要です: actual=${#shards[@]}"
+shards=()
+expected_shard_sizes=()
+input_source_manifest=""
+if [[ -n "${SURVEY_INPUT_MANIFEST:-}" ]]; then
+  [[ -f "$SURVEY_INPUT_MANIFEST" ]] || fail "SURVEY_INPUT_MANIFESTがありません: $SURVEY_INPUT_MANIFEST"
+  input_source_manifest=$(canonical_file "$SURVEY_INPUT_MANIFEST")
+  while IFS= read -r line; do
+    [[ "$line" == shard=*" bytes="*" records="* ]] || continue
+    shard_path=${line#shard=}
+    shard_path=${shard_path%% bytes=*}
+    expected_bytes=${line#* bytes=}
+    expected_bytes=${expected_bytes%% records=*}
+    [[ "$expected_bytes" =~ ^[1-9][0-9]*$ ]] \
+      || fail "SURVEY_INPUT_MANIFESTのshard sizeが不正です: $line"
+    shards+=("$shard_path")
+    expected_shard_sizes+=("$expected_bytes")
+  done <"$input_source_manifest"
+else
+  shopt -s nullglob
+  shards=("$TRAIN_SHARD_DIR"/dlsuisho_unique_*.bin)
+fi
+(( ${#shards[@]} >= 1 )) || fail "取得完了済みの公開教師shardがありません"
+shard_sizes=()
+total_shard_bytes=0
+for index in "${!shards[@]}"; do
+  shard=${shards[$index]}
+  [[ -f "$shard" ]] || fail "survey入力shardがありません: $shard"
+  shard_bytes=$(file_size "$shard")
+  (( shard_bytes > 0 && shard_bytes % PSV_RECORD_BYTES == 0 )) \
+    || fail "公開教師shardが40-byte PSV境界に揃っていません: path=$shard bytes=$shard_bytes"
+  if [[ -n "$input_source_manifest" ]]; then
+    [[ "$shard_bytes" == "${expected_shard_sizes[$index]}" ]] \
+      || fail "survey入力shardのsizeがsnapshotと異なります: path=$shard actual=$shard_bytes expected=${expected_shard_sizes[$index]}"
+  fi
+  shard_sizes+=("$shard_bytes")
+  total_shard_bytes=$((total_shard_bytes + shard_bytes))
+done
+total_shard_positions=$((total_shard_bytes / PSV_RECORD_BYTES))
+(( total_shard_positions >= 4000000 )) \
+  || fail "取得完了済みshardが400万局面に達していません: actual=$total_shard_positions"
 data_arg=$(IFS=,; printf '%s' "${shards[*]}")
 
 command=(
@@ -63,6 +99,23 @@ printf '\n'
 "${command[@]}"
 
 [[ -f "$SURVEY_DIR/metrics.json" ]] || fail "survey metricsが生成されませんでした"
+input_shards_manifest="$SURVEY_DIR/input-shards.txt"
+{
+  printf 'dataset_revision=%s\n' "$TRAIN_DATASET_REVISION"
+  printf 'completed_shards=%s\n' "${#shards[@]}"
+  printf 'total_bytes=%s\n' "$total_shard_bytes"
+  printf 'total_positions=%s\n' "$total_shard_positions"
+  if [[ -n "$input_source_manifest" ]]; then
+    printf 'source_manifest=%s\n' "$input_source_manifest"
+    printf 'source_manifest_sha256=%s\n' "$(sha256_file "$input_source_manifest")"
+  else
+    printf 'source_manifest=completed-shards-at-start\n'
+  fi
+  for index in "${!shards[@]}"; do
+    printf 'shard=%s bytes=%s records=%s\n' \
+      "${shards[$index]}" "${shard_sizes[$index]}" "$((shard_sizes[index] / PSV_RECORD_BYTES))"
+  done
+} | write_manifest_atomic "$input_shards_manifest"
 {
   printf 'survey_id=%s\n' "$SURVEY_ID"
   printf 'created_at=%s\n' "$(date -u +%FT%TZ)"
@@ -70,6 +123,8 @@ printf '\n'
   printf 'metrics=%s\n' "$SURVEY_DIR/metrics.json"
   printf 'metrics_sha256=%s\n' "$(sha256_file "$SURVEY_DIR/metrics.json")"
   printf 'sample_plan_sha256=%s\n' "$(sha256_file "$SURVEY_DIR/sample-plan.bin")"
+  printf 'input_shards=%s\n' "$input_shards_manifest"
+  printf 'input_shards_sha256=%s\n' "$(sha256_file "$input_shards_manifest")"
   printf 'automatic_adoption=false\n'
 } | write_manifest_atomic "$SURVEY_DIR/manifest.txt"
 

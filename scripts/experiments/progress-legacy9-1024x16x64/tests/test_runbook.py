@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -110,6 +111,126 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertEqual(value_after("--num-buckets"), "8")
         self.assertIn("--all-optim", args)
         self.assertNotIn("one-cycle", args)
+
+    def test_survey_accepts_completed_shard_snapshot_before_full_download(self) -> None:
+        script = (SCRIPT_DIR / "run-survey.sh").read_text(encoding="utf-8")
+        plan = (
+            REPO_ROOT / "docs/experiments/progress-legacy9-1024x16x64/PLAN.md"
+        ).read_text(encoding="utf-8")
+        runbook = (
+            REPO_ROOT / "docs/experiments/progress-legacy9-1024x16x64/RUNBOOK.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn('STATE_DIR/prepare_data.done', script)
+        self.assertIn('(( ${#shards[@]} >= 1 ))', script)
+        self.assertIn('total_shard_positions >= 4000000', script)
+        self.assertIn('input-shards.txt', script)
+        self.assertIn('input_shards_sha256', script)
+        self.assertIn('T1の完了を待たず', plan)
+        self.assertIn('T1の完了を待たず', runbook)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copied_script_dir = (
+                root / "scripts/experiments/progress-legacy9-1024x16x64"
+            )
+            copied_script_dir.mkdir(parents=True)
+            for name in ("lib.sh", "run-survey.sh"):
+                shutil.copy2(SCRIPT_DIR / name, copied_script_dir / name)
+
+            survey = root / "target/release/progress-bucket-survey"
+            survey.parent.mkdir(parents=True)
+            survey.write_text(
+                """#!/usr/bin/env bash
+set -Eeuo pipefail
+while (( $# > 0 )); do
+  if [[ "$1" == --output-dir ]]; then
+    output_dir="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+: "${output_dir:?--output-dir is required}"
+mkdir -p "$output_dir"
+printf '{}\n' >"$output_dir/metrics.json"
+printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
+""",
+                encoding="utf-8",
+            )
+            survey.chmod(0o755)
+
+            baseline = root / "progress/baseline/progress.bin"
+            baseline.parent.mkdir(parents=True)
+            with baseline.open("wb") as stream:
+                stream.truncate(1_003_104)
+            shard = root / "data/training/shards/dlsuisho_unique_001.bin"
+            shard.parent.mkdir(parents=True)
+            with shard.open("wb") as stream:
+                stream.truncate(4_000_000 * 40)
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "SURVEY_ID": "partial-one-shard",
+                    "SURVEY_SEED": "20260721",
+                    "CALIBRATION_SAMPLES": "2000000",
+                    "SELECTION_SAMPLES": "1000000",
+                    "FINAL_TEST_SAMPLES": "1000000",
+                    "BASHPID": "12345",
+                }
+            )
+            completed = subprocess.run(
+                [str(copied_script_dir / "run-survey.sh")],
+                check=False,
+                text=True,
+                capture_output=True,
+                cwd=root,
+                env=environment,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+            )
+            output = root / "survey/partial-one-shard"
+            input_snapshot = (output / "input-shards.txt").read_text(
+                encoding="utf-8"
+            )
+            manifest = (output / "manifest.txt").read_text(encoding="utf-8")
+            self.assertIn("completed_shards=1", input_snapshot)
+            self.assertIn("total_positions=4000000", input_snapshot)
+            self.assertIn(str(shard), input_snapshot)
+            self.assertIn("input_shards_sha256=", manifest)
+
+            second_shard = root / "data/training/shards/dlsuisho_unique_002.bin"
+            with second_shard.open("wb") as stream:
+                stream.truncate(4_000_000 * 40)
+            environment.update(
+                {
+                    "SURVEY_ID": "reused-one-shard",
+                    "SURVEY_INPUT_MANIFEST": str(output / "input-shards.txt"),
+                }
+            )
+            reused = subprocess.run(
+                [str(copied_script_dir / "run-survey.sh")],
+                check=False,
+                text=True,
+                capture_output=True,
+                cwd=root,
+                env=environment,
+            )
+            self.assertEqual(
+                reused.returncode,
+                0,
+                f"stdout:\n{reused.stdout}\nstderr:\n{reused.stderr}",
+            )
+            reused_snapshot = (
+                root / "survey/reused-one-shard/input-shards.txt"
+            ).read_text(encoding="utf-8")
+            self.assertIn("completed_shards=1", reused_snapshot)
+            source_manifest = os.path.realpath(output / "input-shards.txt")
+            self.assertIn(f"source_manifest={source_manifest}", reused_snapshot)
+            self.assertNotIn(str(second_shard), reused_snapshot)
 
     def test_monitor_renders_atomic_snapshot(self) -> None:
         monitor = load_module("tatara_monitor", SCRIPT_DIR / "monitor.py")

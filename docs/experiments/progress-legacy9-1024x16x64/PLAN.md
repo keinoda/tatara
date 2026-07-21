@@ -26,6 +26,7 @@ bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket
 | batches / superbatch | 6,104 |
 | precision | `--all-optim` |
 | worker threads | 16 |
+| survey | calibration 200万、selection 100万、final-test 100万、seed `20260721` |
 | 初回 | 367 superbatch、約10.0083 epoch |
 | LR | step、start 0.000875、gamma 0.992、every 1 superbatch |
 | loss | WRM、既存Tatara基準値を維持 |
@@ -52,6 +53,11 @@ workerが2以上なのでoptimizerへ届く順序は非決定的であり、bit�
 `run-training.sh`はT0–T6、係数承認、データSHA-256、monitor生存を再検証する。いずれかが欠ければ
 本学習を開始しない。
 
+T2はT1の完了を待たず、公開教師の取得完了済みshardが1個以上かつ合計400万局面以上になった時点で
+開始できる。survey開始時のshard一覧を固定し、実行中に追加で取得完了したshardは同じsurveyへ
+混ぜない。候補比較ではbaselineの`input-shards.txt`を`SURVEY_INPUT_MANIFEST`に指定し、後から
+増えたshardを除外して同じ母集団を再利用する。T1だけが30 shard全部と連結PSVを必要とする。
+
 ## Surveyの評価対象
 
 - 各splitのbucket 0–7件数と比率
@@ -62,10 +68,11 @@ workerが2以上なのでoptimizerへ届く順序は非決定的であり、bit�
 - active KP-absolute indexが全局面76であること
 - 各境界の直下・直上に最も近いfixture
 
-samplingはglobal record index上で決定的に行い、重複なしで抽出した後、file offset順に読んで
-random I/Oを抑える。calibration・selection・final-testの件数とseedは実行時に明示し、3集合の
-合計を4,000,000とする。final-testを見た後に候補を再調整する場合、その結果を未使用testとは
-扱わず、新しいsurvey IDでやり直す。
+samplingは開始時点で取得完了しているshardのglobal record index上で決定的に行い、重複なしで
+抽出した後、file offset順に読む。入力shard・size・局面数は`input-shards.txt`へ記録する。
+calibration 2,000,000、selection 1,000,000、final-test 1,000,000、seed `20260721`を使う。
+final-testを見た後に候補を再調整する場合、その結果を未使用testとは扱わず、新しいsurvey IDで
+やり直す。
 
 ## 本学習後の判定
 
