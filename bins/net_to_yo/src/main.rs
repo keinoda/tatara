@@ -700,8 +700,8 @@ mod tests {
     }
 
     #[test]
-    fn progress8_full_pipeline_outputs_a_nine_stack_yaneuraou_file() {
-        let expect = detected(FeatureSet::HalfKaHmMerged, 128, 16, 64);
+    fn progress8_1024x16x64_full_pipeline_outputs_a_nine_stack_yaneuraou_file() {
+        let expect = detected(FeatureSet::HalfKaHmMerged, 1024, 16, 64);
         let bytes = synthetic_bin(
             expect.feature_set,
             expect.ft_out,
@@ -715,7 +715,7 @@ mod tests {
         let arch_str = std::str::from_utf8(&out[12..12 + arch_len]).unwrap();
         assert_eq!(
             arch_str,
-            "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->128x2],Network=SFNN_HALFKAHM2_128_15_64_K3K3{LayerStack=9}"
+            "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1024x2],Network=SFNN_HALFKAHM2_1024_15_64_K3K3{LayerStack=9}"
         );
     }
 
