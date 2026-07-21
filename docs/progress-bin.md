@@ -75,7 +75,7 @@ one `progress.bin` can be loaded per run, so to compare epochs run it once per
 `<run-name>.e<N>.bin` and compare the outputs.
 
 Use random survey mode to find a monotone affine correction that moves the
-fixed-width buckets toward a uniform distribution:
+fixed-width buckets toward either a uniform or an explicit target distribution:
 
 ```bash
 target/release/progress-bucket-survey \
@@ -95,12 +95,25 @@ target/release/progress-bucket-survey \
 The command reads each sampled PSV once and sorts the calibration baseline
 logits. It maps the transformed bucket boundaries back into baseline-logit
 space, constrains `a > 0`, and deterministically minimizes the mean squared
-error between every bucket fraction and `1 / num-buckets`. The selection and
+error between every bucket fraction and the target distribution. Omitting a
+target retains the uniform `1 / num-buckets` behavior. The selection and
 final-test splits are evaluation-only. Equal-MSE candidates are resolved by
 maximum bucket deviation, boundary-logit fit, `a`, then `b`. It writes `metrics.json`, boundary
 fixtures, and `progress-optimized-uniform.bin`, but never adopts the generated
 candidate automatically. Add `--candidate NAME:A:B` only to compare a known
 coefficient pair in the same run.
+
+For example, a gentle center-weighted target can be requested explicitly. The
+eight positive percentages must sum to 100:
+
+```bash
+  --optimized-candidate-name optimized-center-gentle \
+  --optimizer-target-percentages 11,12,13,14,14,13,12,11
+```
+
+The requested target and its calibration objective are recorded under
+`affine_optimization` in `metrics.json`. The generated candidate still requires
+review of all three measured splits and is never adopted automatically.
 
 Once you have a `progress.bin` you are happy with, pass it to `nnue-train` via
 `--progress-coeff` when training a `layerstack` net (see

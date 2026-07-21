@@ -130,9 +130,10 @@ dataset、manifestは上書きしない。checksum不一致はtransient failure�
 
 T1の完了を待たず、取得完了済みshardの合計が400万局面以上なら実行できる。scriptは開始時点の
 確定済み`.bin`だけを入力として固定し、実行中に追加で完了したshardを混ぜない。使用したfile・
-size・局面数は`survey/<SURVEY_ID>/input-shards.txt`へ記録する。400万局面は1回だけ読み、
-calibrationのbaseline logitを使って`a > 0`の`optimized-uniform`候補を自動生成する。
-目的関数は8 bucket比率の12.5%からの平均二乗誤差で、selectionとfinal-testは最適化に使わない。
+size・局面数は`survey/<SURVEY_ID>/input-shards.txt`へ記録する。各surveyで400万局面は1回だけ読み、
+calibrationのbaseline logitを使って`a > 0`の候補を自動生成する。目標比率を省略した場合は
+12.5%ずつの`optimized-uniform`、明示した場合はその比率との平均二乗誤差を最小化する。
+selectionとfinal-testは最適化に使わない。
 
 ```bash
 SURVEY_ID=<新しいsurvey名> \
@@ -140,6 +141,21 @@ SURVEY_SEED=20260721 \
 CALIBRATION_SAMPLES=2000000 \
 SELECTION_SAMPLES=1000000 \
 FINAL_TEST_SAMPLES=1000000 \
+  scripts/experiments/progress-legacy9-1024x16x64/run-survey.sh
+```
+
+中央を穏やかに厚くした比率を同じ再現可能なoptimizerで比較する場合は、候補名と8 bucketの合計100%に
+なる目標を両方明示する。目標は探索入力であり、実測比率がその値と一致する保証ではない。
+
+```bash
+SURVEY_ID=<新しいsurvey名> \
+SURVEY_SEED=20260721 \
+CALIBRATION_SAMPLES=2000000 \
+SELECTION_SAMPLES=1000000 \
+FINAL_TEST_SAMPLES=1000000 \
+OPTIMIZED_CANDIDATE_NAME=optimized-center-gentle \
+OPTIMIZER_TARGET_PERCENTAGES='11,12,13,14,14,13,12,11' \
+SURVEY_INPUT_MANIFEST=survey/<比較元のSURVEY_ID>/input-shards.txt \
   scripts/experiments/progress-legacy9-1024x16x64/run-survey.sh
 ```
 
@@ -153,9 +169,9 @@ FINAL_TEST_SAMPLES=1000000 \
 SURVEY_INPUT_MANIFEST=survey/<baselineのSURVEY_ID>/input-shards.txt
 ```
 
-`survey/<SURVEY_ID>/metrics.json`をユーザーへ提示する。最適化された`a,b`、12.5%からのMSEと最大乖離、
-bucket 0–7、migration、境界crossing、total variation、飽和、3 splitの差を確認する。
-`optimized-uniform`を自動採用しない。
+`survey/<SURVEY_ID>/metrics.json`をユーザーへ提示する。最適化された`a,b`、明示目標と12.5%からの
+MSE・最大乖離、bucket 0–7、migration、境界crossing、total variation、飽和、3 splitの差を確認する。
+どの生成候補も自動採用しない。
 
 ```bash
 SURVEY_ID=<survey名> \

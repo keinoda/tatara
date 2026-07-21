@@ -9,8 +9,10 @@ RTX 5090 1枚で、公開済み・shuffle済みの
 bucket 7を未使用のslot 8へ複製する。新しいbinning形式や9 bucket学習は導入しない。
 
 基準`progress.bin`でbucket 0が薄い問題は、教師の手数・総手数を復元せず、既存出力へ
-`z' = a*z+b`を適用する。400万局面を一度だけ読んでbaseline logitを保持し、`a > 0`で元の
-progressとの単調性を保ちながら、8 bucketの比率と12.5%の平均二乗誤差を最小化する。
+`z' = a*z+b`を適用する。各surveyで400万局面を一度だけ読んでbaseline logitを保持し、`a > 0`で元の
+progressとの単調性を保ちながら、8 bucketの比率と明示した目標比率との平均二乗誤差を最小化する。
+目標を省略した場合だけ12.5%ずつのuniform分布を使う。中央を穏やかに厚くする比較では
+`11,12,13,14,14,13,12,11%`を明示し、目標値もsurvey manifestへ記録する。
 最適化結果、分布、bucket移動をユーザーへ提示し、承認された係数だけを使う。自動採用は行わない。
 
 ## 固定する実験条件
@@ -28,7 +30,7 @@ progressとの単調性を保ちながら、8 bucketの比率と12.5%の平均�
 | precision | `--all-optim` |
 | worker threads | 16 |
 | survey | calibration 200万、selection 100万、final-test 100万、seed `20260721`、教師読込み1回 |
-| affine optimizer | `a > 0`、uniform比率MSE、257×257全域格子＋6回絞込み |
+| affine optimizer | `a > 0`、明示目標比率MSE（省略時uniform）、257×257全域格子＋6回絞込み |
 | 初回 | 367 superbatch、約10.0083 epoch |
 | LR | step、start 0.000875、gamma 0.992、every 1 superbatch |
 | loss | WRM、既存Tatara基準値を維持 |
@@ -65,6 +67,7 @@ T2はT1の完了を待たず、公開教師の取得完了済みshardが1個以�
 
 - 各splitのbucket 0–7件数と比率
 - 各splitの12.5%からの平均二乗誤差と最大乖離
+- optimizerへ明示した目標比率と、calibrationにおける目標比率からの平均二乗誤差・最大乖離
 - baselineからのmigration matrix
 - 7境界それぞれのcrossing率
 - total variation
@@ -76,7 +79,8 @@ samplingは開始時点で取得完了しているshardのglobal record index上
 抽出した後、file offset順に1回だけ読む。calibrationのbaseline logitをsortし、affine後の7境界を
 元logit空間へ逆写像して二分探索で比率を評価する。最初と最後の境界位置でparameterizeするため
 `a > 0`が構造的に保証される。探索域は両境界がcalibration logitの最小–最大内にある全組合せとする。
-MSEが同値なら最大乖離、7境界のlogit fit MSE、`a`、`b`の順に比較して結果を決定的にする。
+目標比率MSEが同値なら目標からの最大乖離、7境界のlogit fit MSE、`a`、`b`の順に比較して結果を
+決定的にする。
 入力shard・size・局面数は`input-shards.txt`へ記録する。
 calibration 2,000,000だけを最適化に使い、selection 1,000,000とfinal-test 1,000,000は評価専用、
 seedは`20260721`とする。final-testを見た後に最適化方法を変える場合、その結果を未使用testとは

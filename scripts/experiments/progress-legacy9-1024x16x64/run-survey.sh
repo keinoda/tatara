@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 取得完了済みの公開教師shardを一度だけ読み、単調affine係数を最適化するsurveyを実行する。
+# 取得完了済みの公開教師shardを一度だけ読み、明示目標に対する単調affine係数を最適化する。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -58,6 +58,17 @@ total_shard_positions=$((total_shard_bytes / PSV_RECORD_BYTES))
   || fail "取得完了済みshardが400万局面に達していません: actual=$total_shard_positions"
 data_arg=$(IFS=,; printf '%s' "${shards[*]}")
 
+optimized_candidate_name="${OPTIMIZED_CANDIDATE_NAME:-optimized-uniform}"
+validate_run_name "$optimized_candidate_name"
+optimizer_target="uniform"
+optimizer_objective="uniform-bucket-mse"
+if [[ -n "${OPTIMIZER_TARGET_PERCENTAGES:-}" ]]; then
+  [[ -n "${OPTIMIZED_CANDIDATE_NAME:-}" ]] \
+    || fail "OPTIMIZER_TARGET_PERCENTAGES指定時はOPTIMIZED_CANDIDATE_NAMEも明示してください"
+  optimizer_target="$OPTIMIZER_TARGET_PERCENTAGES"
+  optimizer_objective="explicit-target-bucket-mse"
+fi
+
 command=(
   "$PROGRESS_SURVEY"
   --data "$data_arg"
@@ -67,10 +78,13 @@ command=(
   --num-buckets 8
   --optimize-affine
   --optimize-split calibration
-  --optimized-candidate-name optimized-uniform
+  --optimized-candidate-name "$optimized_candidate_name"
   --optimizer-grid-points 257
   --optimizer-refinements 6
 )
+if [[ "$optimizer_target" != uniform ]]; then
+  command+=(--optimizer-target-percentages "$optimizer_target")
+fi
 
 # 3集合の配分は未決定なので推測しない。合計400万を保ち、3値すべて明示する。
 [[ -n "${CALIBRATION_SAMPLES:-}" ]] || fail "CALIBRATION_SAMPLESを明示してください"
@@ -130,9 +144,10 @@ input_shards_manifest="$SURVEY_DIR/input-shards.txt"
   printf 'sample_plan_sha256=%s\n' "$(sha256_file "$SURVEY_DIR/sample-plan.bin")"
   printf 'input_shards=%s\n' "$input_shards_manifest"
   printf 'input_shards_sha256=%s\n' "$(sha256_file "$input_shards_manifest")"
-  printf 'affine_optimization=uniform-bucket-mse\n'
+  printf 'affine_optimization=%s\n' "$optimizer_objective"
   printf 'optimization_split=calibration\n'
-  printf 'optimized_candidate=optimized-uniform\n'
+  printf 'optimizer_target_percentages=%s\n' "$optimizer_target"
+  printf 'optimized_candidate=%s\n' "$optimized_candidate_name"
   printf 'optimizer_grid_points=257\n'
   printf 'optimizer_refinements=6\n'
   printf 'teacher_data_passes=1\n'

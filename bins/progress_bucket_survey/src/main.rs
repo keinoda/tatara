@@ -2,8 +2,8 @@
 //!
 //! 従来の先頭/stride読みを残しつつ、`--output-dir`指定時は複数PSVを一つの
 //! 母集団として扱い、seed固定の重複なし無作為抽出を行う。affine候補の明示比較に加え、
-//! 一度読み込んだsampleのbaseline logitから、uniform bucket分布へ近づける`a,b`を
-//! `a > 0`制約付きで決定的に最適化できる。生成候補の採用は行わない。
+//! 一度読み込んだsampleのbaseline logitから、uniformまたは明示したbucket比率へ近づける
+//! `a,b`を`a > 0`制約付きで決定的に最適化できる。生成候補の採用は行わない。
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -82,6 +82,11 @@ struct Args {
     #[arg(long, default_value = "optimized-uniform")]
     optimized_candidate_name: String,
 
+    /// Target bucket percentages as a comma-separated list summing to 100.
+    /// When omitted, every bucket receives the uniform target.
+    #[arg(long)]
+    optimizer_target_percentages: Option<String>,
+
     /// Grid points per axis for each deterministic affine optimization round.
     #[arg(long, default_value_t = 257)]
     optimizer_grid_points: usize,
@@ -126,7 +131,7 @@ struct ObservedSample {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct UniformScore {
+struct TargetScore {
     mean_squared_error: f64,
     max_abs_deviation: f64,
     boundary_fit_mse: f64,
@@ -136,7 +141,7 @@ struct UniformScore {
 struct AffineOptimization {
     a: f64,
     b: f64,
-    score: UniformScore,
+    score: TargetScore,
     histogram: Vec<u64>,
     evaluations: u64,
     logit_min: f64,
@@ -257,7 +262,8 @@ struct AffineOptimizationReport {
     parameterization: &'static str,
     search_domain: &'static str,
     monotonicity_constraint: &'static str,
-    target_percentage_per_bucket: f64,
+    target_percentages: Vec<f64>,
+    target_percentage_per_bucket: Option<f64>,
     grid_points_per_axis: usize,
     refinement_rounds: usize,
     evaluations: u64,
@@ -267,6 +273,8 @@ struct AffineOptimizationReport {
     a: f64,
     b: f64,
     theoretical_calibration_histogram: Vec<u64>,
+    theoretical_target_mean_squared_error: f64,
+    theoretical_target_max_abs_deviation_percentage_points: f64,
     theoretical_uniformity_mean_squared_error: f64,
     theoretical_max_abs_deviation_percentage_points: f64,
     teacher_data_passes: u32,
@@ -332,6 +340,53 @@ fn parse_splits(values: &[String], fallback: usize) -> Result<Vec<SplitSpec>, St
         });
     }
     Ok(out)
+}
+
+fn parse_optimizer_target_percentages(
+    value: Option<&str>,
+    num_buckets: usize,
+) -> Result<Vec<f64>, String> {
+    if value.is_none() {
+        return Ok(vec![100.0 / num_buckets as f64; num_buckets]);
+    }
+    let value = value.expect("checked above");
+    let percentages: Vec<f64> = value
+        .split(',')
+        .map(str::trim)
+        .map(|part| {
+            part.parse::<f64>().map_err(|_| {
+                format!("invalid --optimizer-target-percentages value '{part}' in '{value}'")
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    if percentages.len() != num_buckets {
+        return Err(format!(
+            "--optimizer-target-percentages requires exactly {num_buckets} values (got {})",
+            percentages.len()
+        ));
+    }
+    if percentages
+        .iter()
+        .any(|percentage| !percentage.is_finite() || *percentage <= 0.0)
+    {
+        return Err(
+            "--optimizer-target-percentages requires finite values greater than zero".to_string(),
+        );
+    }
+    let sum: f64 = percentages.iter().sum();
+    if (sum - 100.0).abs() > 1.0e-6 {
+        return Err(format!(
+            "--optimizer-target-percentages must sum to 100 (got {sum})"
+        ));
+    }
+    Ok(percentages)
+}
+
+fn target_is_uniform(percentages: &[f64]) -> bool {
+    let target = 100.0 / percentages.len() as f64;
+    percentages
+        .iter()
+        .all(|percentage| (*percentage - target).abs() <= 1.0e-12)
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -566,23 +621,30 @@ fn histogram_for_affine(sorted_logits: &[f32], a: f64, b: f64, num_buckets: usiz
     histogram
 }
 
-fn uniform_score(
-    sorted_logits: &[f32],
-    target_quantiles: &[f64],
-    a: f64,
-    b: f64,
-    num_buckets: usize,
-) -> UniformScore {
-    let histogram = histogram_for_affine(sorted_logits, a, b, num_buckets);
-    let target = 1.0 / num_buckets as f64;
-    let total = sorted_logits.len() as f64;
+fn distribution_score(histogram: &[u64], target_percentages: &[f64]) -> (f64, f64) {
+    debug_assert_eq!(histogram.len(), target_percentages.len());
+    let total = histogram.iter().sum::<u64>() as f64;
     let mut squared_error = 0.0;
     let mut max_abs_deviation = 0.0f64;
-    for count in histogram {
-        let deviation = count as f64 / total - target;
+    for (&count, &target_percentage) in histogram.iter().zip(target_percentages) {
+        let deviation = count as f64 / total - target_percentage / 100.0;
         squared_error += deviation * deviation;
         max_abs_deviation = max_abs_deviation.max(deviation.abs());
     }
+    (squared_error / histogram.len() as f64, max_abs_deviation)
+}
+
+fn target_score(
+    sorted_logits: &[f32],
+    target_quantiles: &[f64],
+    target_percentages: &[f64],
+    a: f64,
+    b: f64,
+    num_buckets: usize,
+) -> TargetScore {
+    let histogram = histogram_for_affine(sorted_logits, a, b, num_buckets);
+    let (mean_squared_error, max_abs_deviation) =
+        distribution_score(&histogram, target_percentages);
 
     let boundary_fit_mse = target_quantiles
         .iter()
@@ -595,18 +657,18 @@ fn uniform_score(
         .sum::<f64>()
         / target_quantiles.len().max(1) as f64;
 
-    UniformScore {
-        mean_squared_error: squared_error / num_buckets as f64,
+    TargetScore {
+        mean_squared_error,
         max_abs_deviation,
         boundary_fit_mse,
     }
 }
 
 fn score_is_better(
-    candidate: UniformScore,
+    candidate: TargetScore,
     candidate_a: f64,
     candidate_b: f64,
-    current: UniformScore,
+    current: TargetScore,
     current_a: f64,
     current_b: f64,
 ) -> bool {
@@ -628,9 +690,10 @@ fn score_is_better(
         .is_lt()
 }
 
-fn optimize_uniform_affine(
+fn optimize_affine_for_target(
     sorted_logits: &[f32],
     num_buckets: usize,
+    target_percentages: &[f64],
     grid_points: usize,
     refinement_rounds: usize,
 ) -> Result<AffineOptimization, String> {
@@ -645,6 +708,16 @@ fn optimize_uniform_affine(
     if sorted_logits.iter().any(|value| !value.is_finite()) {
         return Err("optimization split contains a non-finite baseline logit".to_string());
     }
+    if target_percentages.len() != num_buckets
+        || target_percentages
+            .iter()
+            .any(|percentage| !percentage.is_finite() || *percentage <= 0.0)
+        || (target_percentages.iter().sum::<f64>() - 100.0).abs() > 1.0e-6
+    {
+        return Err(format!(
+            "optimizer target requires {num_buckets} finite positive percentages summing to 100"
+        ));
+    }
 
     let logit_min = f64::from(sorted_logits[0]);
     let logit_max = f64::from(sorted_logits[sorted_logits.len() - 1]);
@@ -652,8 +725,14 @@ fn optimize_uniform_affine(
         return Err("optimization split baseline logits have no variation".to_string());
     }
 
-    let target_quantiles: Vec<_> = (1..num_buckets)
-        .map(|boundary| quantile_sorted(sorted_logits, boundary as f64 / num_buckets as f64))
+    let mut cumulative_target = 0.0;
+    let target_quantiles: Vec<_> = target_percentages
+        .iter()
+        .take(num_buckets - 1)
+        .map(|percentage| {
+            cumulative_target += percentage / 100.0;
+            quantile_sorted(sorted_logits, cumulative_target)
+        })
         .collect();
     let first_target_logit = probability_logit(1.0 / num_buckets as f64);
     let last_target_logit = probability_logit((num_buckets - 1) as f64 / num_buckets as f64);
@@ -662,13 +741,13 @@ fn optimize_uniform_affine(
     let mut first_high = logit_max;
     let mut last_low = logit_min;
     let mut last_high = logit_max;
-    let mut best: Option<(UniformScore, f64, f64)> = None;
+    let mut best: Option<(TargetScore, f64, f64)> = None;
     let mut evaluations = 0u64;
 
     for _ in 0..=refinement_rounds {
         let first_step = (first_high - first_low) / (grid_points - 1) as f64;
         let last_step = (last_high - last_low) / (grid_points - 1) as f64;
-        let mut round_best: Option<(UniformScore, f64, f64)> = None;
+        let mut round_best: Option<(TargetScore, f64, f64)> = None;
 
         for first_index in 0..grid_points {
             let first_boundary = first_low + first_step * first_index as f64;
@@ -682,7 +761,14 @@ fn optimize_uniform_affine(
                 if !(a.is_finite() && a > 0.0 && b.is_finite()) {
                     continue;
                 }
-                let score = uniform_score(sorted_logits, &target_quantiles, a, b, num_buckets);
+                let score = target_score(
+                    sorted_logits,
+                    &target_quantiles,
+                    target_percentages,
+                    a,
+                    b,
+                    num_buckets,
+                );
                 evaluations += 1;
                 if round_best.is_none_or(|(current, current_a, current_b)| {
                     score_is_better(score, a, b, current, current_a, current_b)
@@ -918,6 +1004,10 @@ fn run_random_survey(
     {
         return Err("--saturation-epsilon must be finite and in (0, 0.5)".into());
     }
+    let optimizer_target_percentages = parse_optimizer_target_percentages(
+        args.optimizer_target_percentages.as_deref(),
+        args.num_buckets,
+    )?;
     ensure_output_dir(output_dir)?;
     let files = inspect_data_files(data_paths)?;
     let total_records: u64 = files.iter().map(|file| file.records).sum();
@@ -992,12 +1082,17 @@ fn run_random_survey(
             .map(|sample| sample.baseline_logit)
             .collect();
         sorted_logits.sort_unstable_by(f32::total_cmp);
-        let optimized = optimize_uniform_affine(
+        let optimized = optimize_affine_for_target(
             &sorted_logits,
             args.num_buckets,
+            &optimizer_target_percentages,
             args.optimizer_grid_points,
             args.optimizer_refinements,
         )?;
+        let uniform_target = vec![100.0 / args.num_buckets as f64; args.num_buckets];
+        let (uniform_mse, uniform_max_abs_deviation) =
+            distribution_score(&optimized.histogram, &uniform_target);
+        let uniform_target_requested = target_is_uniform(&optimizer_target_percentages);
         candidates.push(build_candidate(
             &args.optimized_candidate_name,
             optimized.a,
@@ -1007,12 +1102,18 @@ fn run_random_survey(
         Some(AffineOptimizationReport {
             source_split: args.optimize_split.clone(),
             method: "deterministic-full-range-grid-with-local-refinement-v1",
-            objective: "mean-squared-error-of-bucket-fractions-from-uniform",
+            objective: if uniform_target_requested {
+                "mean-squared-error-of-bucket-fractions-from-uniform"
+            } else {
+                "mean-squared-error-of-bucket-fractions-from-explicit-target"
+            },
             tie_breakers: "max-absolute-bucket-deviation,boundary-logit-fit-mse,a,b",
             parameterization: "baseline-logit-boundaries-for-first-and-last-bucket",
             search_domain: "both-extreme-boundaries-within-calibration-logit-min-max",
             monotonicity_constraint: "a>0",
-            target_percentage_per_bucket: 100.0 / args.num_buckets as f64,
+            target_percentages: optimizer_target_percentages.clone(),
+            target_percentage_per_bucket: uniform_target_requested
+                .then_some(100.0 / args.num_buckets as f64),
             grid_points_per_axis: args.optimizer_grid_points,
             refinement_rounds: args.optimizer_refinements,
             evaluations: optimized.evaluations,
@@ -1022,9 +1123,11 @@ fn run_random_survey(
             a: optimized.a,
             b: optimized.b,
             theoretical_calibration_histogram: optimized.histogram,
-            theoretical_uniformity_mean_squared_error: optimized.score.mean_squared_error,
-            theoretical_max_abs_deviation_percentage_points: 100.0
+            theoretical_target_mean_squared_error: optimized.score.mean_squared_error,
+            theoretical_target_max_abs_deviation_percentage_points: 100.0
                 * optimized.score.max_abs_deviation,
+            theoretical_uniformity_mean_squared_error: uniform_mse,
+            theoretical_max_abs_deviation_percentage_points: 100.0 * uniform_max_abs_deviation,
             teacher_data_passes: 1,
         })
     } else {
@@ -1237,6 +1340,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         if args.optimizer_grid_points < 3 || args.optimizer_grid_points.is_multiple_of(2) {
             return Err("--optimizer-grid-points must be an odd integer >= 3".into());
         }
+    } else if args.optimizer_target_percentages.is_some() {
+        return Err("--optimizer-target-percentages requires --optimize-affine".into());
     }
     let paths = parse_data_paths(&args.data)?;
     if let Some(output_dir) = &args.output_dir {
@@ -1246,8 +1351,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             || !args.splits.is_empty()
             || !args.candidates.is_empty()
             || args.optimize_affine
+            || args.optimizer_target_percentages.is_some()
         {
-            return Err("--seed/--split/--candidate/--optimize-affine require --output-dir".into());
+            return Err("--seed/--split/--candidate/--optimize-affine/--optimizer-target-percentages require --output-dir".into());
         }
         run_legacy(&args, &paths)
     }
@@ -1320,6 +1426,29 @@ mod tests {
     }
 
     #[test]
+    fn optimizer_target_percentages_default_to_uniform_and_validate_explicit_target() {
+        assert_eq!(
+            parse_optimizer_target_percentages(None, 8).expect("uniform target"),
+            vec![12.5; 8]
+        );
+        assert_eq!(
+            parse_optimizer_target_percentages(Some("11,12,13,14,14,13,12,11"), 8,)
+                .expect("center target"),
+            vec![11.0, 12.0, 13.0, 14.0, 14.0, 13.0, 12.0, 11.0]
+        );
+        assert!(
+            parse_optimizer_target_percentages(Some("12.5,12.5"), 8)
+                .expect_err("wrong bucket count")
+                .contains("exactly 8")
+        );
+        assert!(
+            parse_optimizer_target_percentages(Some("10,10,10,10,10,10,10,10"), 8)
+                .expect_err("wrong sum")
+                .contains("sum to 100")
+        );
+    }
+
+    #[test]
     fn migration_and_crossing_are_recorded() {
         let mut acc = SplitAccumulator::new(8);
         acc.record(0.10, 0, 2, 76, 1.0e-6);
@@ -1347,7 +1476,8 @@ mod tests {
         }
         logits.sort_unstable_by(f32::total_cmp);
 
-        let optimized = optimize_uniform_affine(&logits, 8, 65, 4).expect("optimization");
+        let optimized =
+            optimize_affine_for_target(&logits, 8, &[12.5; 8], 65, 4).expect("optimization");
         assert!(optimized.a > 0.0);
         assert_eq!(optimized.histogram.iter().sum::<u64>(), 8_000);
         assert!(
@@ -1364,9 +1494,43 @@ mod tests {
     }
 
     #[test]
+    fn affine_optimizer_matches_a_center_weighted_target() {
+        let expected_a = 1.25;
+        let expected_b = -0.45;
+        let target_percentages = [11.0, 12.0, 13.0, 14.0, 14.0, 13.0, 12.0, 11.0];
+        let target_counts = [880usize, 960, 1_040, 1_120, 1_120, 1_040, 960, 880];
+        let mut logits = Vec::with_capacity(8_000);
+        for (bucket, &count) in target_counts.iter().enumerate() {
+            for index in 0..count {
+                let within_bucket = (index as f64 + 0.5) / count as f64;
+                let probability = (bucket as f64 + within_bucket) / 8.0;
+                logits.push(((probability_logit(probability) - expected_b) / expected_a) as f32);
+            }
+        }
+        logits.sort_unstable_by(f32::total_cmp);
+
+        let optimized = optimize_affine_for_target(&logits, 8, &target_percentages, 65, 4)
+            .expect("center target optimization");
+        assert!(optimized.a > 0.0);
+        assert!(
+            optimized
+                .histogram
+                .iter()
+                .zip(target_counts)
+                .all(|(&actual, expected)| actual.abs_diff(expected as u64) <= 2),
+            "histogram={:?}, a={}, b={}",
+            optimized.histogram,
+            optimized.a,
+            optimized.b
+        );
+        assert!(optimized.score.mean_squared_error <= 1.0e-7);
+    }
+
+    #[test]
     fn optimized_affine_mapping_is_monotone_by_construction() {
         let logits = vec![-4.0, -2.0, -0.5, 0.0, 0.75, 1.5, 3.0, 5.0];
-        let optimized = optimize_uniform_affine(&logits, 8, 33, 3).expect("optimization");
+        let optimized =
+            optimize_affine_for_target(&logits, 8, &[12.5; 8], 33, 3).expect("optimization");
         let transformed: Vec<_> = logits
             .iter()
             .map(|&logit| optimized.a * f64::from(logit) + optimized.b)
@@ -1378,7 +1542,8 @@ mod tests {
     #[test]
     fn affine_optimizer_rejects_even_grid_size() {
         let logits = vec![-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
-        let error = optimize_uniform_affine(&logits, 8, 32, 2).expect_err("even grid");
+        let error =
+            optimize_affine_for_target(&logits, 8, &[12.5; 8], 32, 2).expect_err("even grid");
         assert!(error.contains("odd integer"));
     }
 
@@ -1424,7 +1589,8 @@ mod tests {
             candidates: Vec::new(),
             optimize_affine: true,
             optimize_split: "calibration".to_string(),
-            optimized_candidate_name: "optimized-uniform".to_string(),
+            optimized_candidate_name: "optimized-center-gentle".to_string(),
+            optimizer_target_percentages: Some("11,12,13,14,14,13,12,11".to_string()),
             optimizer_grid_points: 33,
             optimizer_refinements: 2,
             saturation_epsilon: 1.0e-6,
@@ -1437,11 +1603,19 @@ mod tests {
         assert_eq!(report["schema_version"], 2);
         assert_eq!(report["automatic_adoption"], false);
         assert_eq!(report["affine_optimization"]["teacher_data_passes"], 1);
+        assert_eq!(
+            report["affine_optimization"]["target_percentages"],
+            serde_json::json!([11.0, 12.0, 13.0, 14.0, 14.0, 13.0, 12.0, 11.0])
+        );
+        assert_eq!(
+            report["affine_optimization"]["target_percentage_per_bucket"],
+            serde_json::Value::Null
+        );
         assert!(report["affine_optimization"]["a"].as_f64().unwrap() > 0.0);
         assert_eq!(report["candidates"][0]["name"], "baseline");
-        assert_eq!(report["candidates"][1]["name"], "optimized-uniform");
+        assert_eq!(report["candidates"][1]["name"], "optimized-center-gentle");
         assert_eq!(
-            std::fs::metadata(output.join("progress-optimized-uniform.bin"))
+            std::fs::metadata(output.join("progress-optimized-center-gentle.bin"))
                 .expect("optimized progress")
                 .len(),
             (SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * size_of::<f64>()) as u64

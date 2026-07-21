@@ -127,7 +127,9 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertIn('input_shards_sha256', script)
         self.assertIn('--optimize-affine', script)
         self.assertIn('--optimize-split calibration', script)
-        self.assertIn('--optimized-candidate-name optimized-uniform', script)
+        self.assertIn('--optimized-candidate-name "$optimized_candidate_name"', script)
+        self.assertIn('OPTIMIZER_TARGET_PERCENTAGES', script)
+        self.assertIn('--optimizer-target-percentages', script)
         self.assertIn('teacher_data_passes=1', script)
         self.assertIn('T1の完了を待たず', plan)
         self.assertIn('T1の完了を待たず', runbook)
@@ -208,6 +210,7 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             self.assertIn(str(shard), input_snapshot)
             self.assertIn("input_shards_sha256=", manifest)
             self.assertIn("affine_optimization=uniform-bucket-mse", manifest)
+            self.assertIn("optimizer_target_percentages=uniform", manifest)
             self.assertIn("optimized_candidate=optimized-uniform", manifest)
             self.assertIn("automatic_adoption=false", manifest)
 
@@ -240,6 +243,44 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             source_manifest = os.path.realpath(output / "input-shards.txt")
             self.assertIn(f"source_manifest={source_manifest}", reused_snapshot)
             self.assertNotIn(str(second_shard), reused_snapshot)
+
+            environment.update(
+                {
+                    "SURVEY_ID": "center-target-one-shard",
+                    "OPTIMIZER_TARGET_PERCENTAGES": "11,12,13,14,14,13,12,11",
+                    "OPTIMIZED_CANDIDATE_NAME": "optimized-center-gentle",
+                }
+            )
+            center = subprocess.run(
+                [str(copied_script_dir / "run-survey.sh")],
+                check=False,
+                text=True,
+                capture_output=True,
+                cwd=root,
+                env=environment,
+            )
+            self.assertEqual(
+                center.returncode,
+                0,
+                f"stdout:\n{center.stdout}\nstderr:\n{center.stderr}",
+            )
+            self.assertIn(
+                "--optimizer-target-percentages 11\\,12\\,13\\,14\\,14\\,13\\,12\\,11",
+                center.stdout,
+            )
+            center_manifest = (
+                root / "survey/center-target-one-shard/manifest.txt"
+            ).read_text(encoding="utf-8")
+            self.assertIn(
+                "optimizer_target_percentages=11,12,13,14,14,13,12,11",
+                center_manifest,
+            )
+            self.assertIn(
+                "affine_optimization=explicit-target-bucket-mse", center_manifest
+            )
+            self.assertIn(
+                "optimized_candidate=optimized-center-gentle", center_manifest
+            )
 
     def test_monitor_renders_atomic_snapshot(self) -> None:
         monitor = load_module("tatara_monitor", SCRIPT_DIR / "monitor.py")

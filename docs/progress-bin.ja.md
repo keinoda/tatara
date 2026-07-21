@@ -69,7 +69,8 @@ bucket ごとの件数・割合と top bucket の占有率を表示する。1 �
 `progress.bin` は 1 つなので、epoch を比較するときは `<run-name>.e<N>.bin` ごとに
 1 回ずつ実行して出力を比べる。
 
-固定幅bucketを均等分布へ近づけるaffine補正を求める場合はrandom survey modeを使う。
+固定幅bucketを均等分布または明示した目標比率へ近づけるaffine補正を求める場合はrandom survey
+modeを使う。
 
 ```bash
 target/release/progress-bucket-survey \
@@ -87,11 +88,22 @@ target/release/progress-bucket-survey \
 ```
 
 sampled PSVは1回だけ読み、calibrationのbaseline logitをsortする。affine後のbucket境界を
-元logit空間へ逆写像し、`a > 0`を保ったまま各bucket比率と`1 / num-buckets`の平均二乗誤差を
+元logit空間へ逆写像し、`a > 0`を保ったまま各bucket比率と目標比率の平均二乗誤差を
 決定的な格子探索で最小化する。同一MSEでは最大乖離、境界logit fit、`a`、`b`の順をtie-breakに使う。
 selectionとfinal-testは評価専用である。`metrics.json`、境界fixture、
 補正済み`progress-optimized-uniform.bin`を生成するが、自動採用はしない。既知の`a,b`を同時比較
 したい場合だけ`--candidate NAME:A:B`を追加する。
+
+目標を省略すると従来どおり全bucketが均等になる。中央を穏やかに厚くする例では、候補名と合計100%の
+8値を明示する。
+
+```bash
+  --optimized-candidate-name optimized-center-gentle \
+  --optimizer-target-percentages 11,12,13,14,14,13,12,11
+```
+
+目標値とcalibration上の目標MSEは`metrics.json`の`affine_optimization`へ記録される。生成された
+実測分布は別途3 splitすべてで確認し、目標を指定しただけで採用済みとは扱わない。
 
 満足のいく `progress.bin` が得られたら、`layerstack` net の学習時に `nnue-train`
 へ `--progress-coeff` で渡す([docs/training-quickstart.ja.md](training-quickstart.ja.md) 参照)。

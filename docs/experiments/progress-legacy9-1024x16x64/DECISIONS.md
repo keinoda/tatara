@@ -24,7 +24,8 @@
 | survey入力 | 開始時点の取得完了済み公開shardを固定 | 1 shard以上かつ合計400万局面以上。通常は教師読込み1回で最適化まで完了 |
 | survey split | calibration 2,000,000、selection 1,000,000、final-test 1,000,000 | 合計400万局面 |
 | survey seed | `20260721` | 重複なしglobal index samplingを固定 |
-| affine optimizer | calibrationで8比率の12.5%からのMSEを最小化 | `a > 0`、257×257全域格子＋6回絞込み、PSV再読込みなし |
+| affine optimizer | calibrationで明示目標比率からのMSEを最小化。省略時は12.5%ずつ | `a > 0`、257×257全域格子＋6回絞込み、PSV再読込みなし |
+| 中央厚め比較target | `11,12,13,14,14,13,12,11%` | bucket 0を薄く戻さず、中央を穏やかに厚くする比較条件。採用値ではない |
 | survey採用 | 最適化候補とbaselineの3 split結果を提示し、採用はユーザー判断 | 係数候補は生成するが自動採用なし |
 | monitor | port 6001、Basic認証、2 routeだけ配信 | directory listingと無認証公開をしない |
 | checkpoint選択 | 保存済み`.bin`内の最小test lossを報告 | 自動採用しない |
