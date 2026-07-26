@@ -215,7 +215,7 @@ build_training_command() {
     --superbatches "$COMMAND_SUPERBATCHES"
     --lr 8.75e-4
     --lr-schedule step
-    --lr-gamma 0.992
+    --lr-gamma 0.995
     --lr-step 1
     --wdl 0.3333333
     --win-rate-model

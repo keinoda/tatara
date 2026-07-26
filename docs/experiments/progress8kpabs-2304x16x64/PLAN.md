@@ -79,7 +79,7 @@ checkpoints等の余裕100GBとして約813GBを要求する。Vast.aiの`/works
 | 初回 | 841 superbatch |
 | 学習局面数 | 336,426,696,704 |
 | 実epoch | 約19.995581 |
-| LR | step、start `8.75e-4`、gamma `0.992`、every 1 SB |
+| LR | step、start `8.75e-4`、gamma `0.995`、every 1 SB |
 | loss | WRM、WDL `0.3333333`、既存WRM係数を維持 |
 | optimizer | Ranger、weight decay 0 |
 | precision | `--all-optim` |
@@ -89,7 +89,8 @@ checkpoints等の余裕100GBとして約813GBを要求する。Vast.aiの`/works
 | FV scale | 28 |
 
 841 SBは`65536 × 6104 × 841 / 16,825,052,646`から求めた20 epochへの
-最寄りの整数SBである。LRの方式・開始値・gammaは変えない。
+最寄りの整数SBである。gamma `0.995`では841 SB終了時のLRが約`1.3e-5`となり、
+20 epoch全体で学習率を滑らかに減衰させる。
 
 ## 本学習前gate
 

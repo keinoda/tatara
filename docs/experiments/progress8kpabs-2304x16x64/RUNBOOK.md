@@ -259,7 +259,7 @@ MONITOR_PASSWORD="$MONITOR_PASSWORD" \
 --superbatches 841
 --lr 8.75e-4
 --lr-schedule step
---lr-gamma 0.992
+--lr-gamma 0.995
 --lr-step 1
 --all-optim
 --threads 16

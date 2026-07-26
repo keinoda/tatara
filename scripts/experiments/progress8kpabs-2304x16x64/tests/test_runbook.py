@@ -115,7 +115,7 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertEqual(value_after("--test-positions"), "851968")
         self.assertEqual(value_after("--lr-schedule"), "step")
         self.assertEqual(value_after("--lr"), "8.75e-4")
-        self.assertEqual(value_after("--lr-gamma"), "0.992")
+        self.assertEqual(value_after("--lr-gamma"), "0.995")
         self.assertEqual(value_after("--lr-step"), "1")
         self.assertEqual(value_after("--ft-out"), "2304")
         self.assertEqual(value_after("--l1"), "16")
