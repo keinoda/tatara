@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Vast.aiで公開教師データを使う1024x16x64学習環境を準備する。
+# Vast.aiで公開教師データを使う2304x16x64学習環境を準備する。
 #
 # 実施範囲:
 #   - bootstrapが/workspace直下へcloneした指定Tatara commitを検証
 #   - official upstreamの固定commitを設定し、専用commitがそれを含むことを検証
-#   - 公開教師30 shardとfloodgate validationのdownload
+#   - 公開教師34 shardを1個ずつdownload・検証し、単一PSVの末尾へ順次追記
 #   - legacy progress.binの固定commitからのdownloadとchecksum検証
-#   - Tatara/rshogiのbuild、教師PSVの連結、validation PSVの生成
+#   - Tatara/rshogiのbuild、validation PSVの生成
 #
 # 本学習、progress係数の採用、外部backupは自動実行しない。
-# 30 shardと連結PSVを同時保持するため、/workspaceは最低1.3 TB必要。
+# shard全体と連結PSVを二重保持せず、1 TBの/workspace内で準備する。
 set -Eeuo pipefail
 
 export WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
-export EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$WORKSPACE_ROOT/progress-legacy9-1024x16x64-training}"
+export EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$WORKSPACE_ROOT/progress8kpabs-2304x16x64-training}"
 export CARGO_HOME="${CARGO_HOME:-/opt/cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-/opt/rustup}"
 export HF_HOME="${HF_HOME:-$EXPERIMENT_ROOT/.runtime/huggingface}"
@@ -40,14 +40,19 @@ readonly YANEURAOU_COMMIT="771fe811f877859d6851ceccfd3e04c16454e689"
 readonly CONTAINER_IMAGE="ghcr.io/keinoda/shogi-lab:cuda129-trt1011"
 readonly CONTAINER_IMAGE_DIGEST="sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876"
 
-readonly TRAIN_DATASET="washiun/Knowledge_distilled_dataset_by_DLSuisho15b_unique"
-readonly TRAIN_DATASET_REVISION="5da309f4de4091cfb004eff94da97d49e3268aa2"
+readonly TRAIN_DATASET="sashimin/test20260726"
+readonly TRAIN_DATASET_REVISION="8f461dd8dc4cb90c356392545a41e4e45c8f2418"
 export TRAIN_DATA_DIR="$EXPERIMENT_ROOT/data/training"
 export TRAIN_SHARD_DIR="$TRAIN_DATA_DIR/shards"
 export TRAIN_PSV="$TRAIN_DATA_DIR/public-teacher.psv"
-readonly TRAIN_EXPECTED_SHARDS=30
-readonly TRAIN_EXPECTED_BYTES=586757977480
-readonly TRAIN_EXPECTED_POSITIONS=14668949437
+export TRAIN_PARTIAL_PSV="$TRAIN_PSV.partial"
+export TRAIN_APPEND_STATE_DIR="$EXPERIMENT_ROOT/.onstart/training-append"
+export TRAIN_SHARD_SPEC="$EXPERIMENT_ROOT/scripts/experiments/progress8kpabs-2304x16x64/training-shards.tsv"
+export TRAIN_SURVEY_SHARD="$TRAIN_SHARD_DIR/split_000.bin"
+readonly TRAIN_EXPECTED_SHARDS=34
+readonly TRAIN_EXPECTED_BYTES=673002105840
+readonly TRAIN_EXPECTED_POSITIONS=16825052646
+readonly TRAIN_MAX_SHARD_BYTES=20000000000
 
 readonly VALIDATION_DATASET="takaoyamaoka/floodgate.hcpe"
 readonly VALIDATION_DATASET_REVISION="fdd5f602db82d888a87116f087d10dd5ea8313ab"
@@ -91,7 +96,7 @@ file_size() {
 
 for command_name in \
   awk bash cat chmod chown cmp curl cut date df find git grep head mv nproc paste python3 realpath rm \
-  rustc service sha256sum sleep stat tee tmux touch; do
+  rustc service sha256sum sleep stat tail tee tmux touch truncate; do
   require_command "$command_name"
 done
 
@@ -132,13 +137,14 @@ git -C "$EXPERIMENT_ROOT" merge-base --is-ancestor \
 export STATE_DIR="$EXPERIMENT_ROOT/.onstart"
 export LOG_DIR="$EXPERIMENT_ROOT/logs/onstart"
 export MANIFEST_DIR="$EXPERIMENT_ROOT/manifests"
-readonly PLAN_PATH="$EXPERIMENT_ROOT/docs/experiments/progress-legacy9-1024x16x64/PLAN.md"
-readonly DECISIONS_PATH="$EXPERIMENT_ROOT/docs/experiments/progress-legacy9-1024x16x64/DECISIONS.md"
-readonly RUNBOOK_PATH="$EXPERIMENT_ROOT/docs/experiments/progress-legacy9-1024x16x64/RUNBOOK.md"
-readonly TRAIN_LAUNCHER="$EXPERIMENT_ROOT/scripts/experiments/progress-legacy9-1024x16x64/run-training.sh"
+readonly PLAN_PATH="$EXPERIMENT_ROOT/docs/experiments/progress8kpabs-2304x16x64/PLAN.md"
+readonly DECISIONS_PATH="$EXPERIMENT_ROOT/docs/experiments/progress8kpabs-2304x16x64/DECISIONS.md"
+readonly RUNBOOK_PATH="$EXPERIMENT_ROOT/docs/experiments/progress8kpabs-2304x16x64/RUNBOOK.md"
+readonly TRAIN_LAUNCHER="$EXPERIMENT_ROOT/scripts/experiments/progress8kpabs-2304x16x64/run-training.sh"
 
 mkdir -p \
   "$STATE_DIR" \
+  "$TRAIN_APPEND_STATE_DIR" \
   "$LOG_DIR" \
   "$MANIFEST_DIR" \
   "$HF_HOME" \
@@ -155,6 +161,13 @@ echo "===== onstart $(date -u +%FT%TZ) ====="
 [[ -f "$DECISIONS_PATH" ]] || fail "決定台帳がありません: $DECISIONS_PATH"
 [[ -f "$RUNBOOK_PATH" ]] || fail "実行手順がありません: $RUNBOOK_PATH"
 [[ -x "$TRAIN_LAUNCHER" ]] || fail "学習launcherがありません: $TRAIN_LAUNCHER"
+[[ -f "$TRAIN_SHARD_SPEC" ]] || fail "教師shard仕様がありません: $TRAIN_SHARD_SPEC"
+spec_shards=$(awk 'NF {count++} END {print count+0}' "$TRAIN_SHARD_SPEC")
+spec_bytes=$(awk 'NF {total += $2} END {printf "%.0f\n", total}' "$TRAIN_SHARD_SPEC")
+(( spec_shards == TRAIN_EXPECTED_SHARDS )) \
+  || fail "教師shard仕様の件数が不正です: actual=$spec_shards expected=$TRAIN_EXPECTED_SHARDS"
+(( spec_bytes == TRAIN_EXPECTED_BYTES )) \
+  || fail "教師shard仕様の合計sizeが不正です: actual=$spec_bytes expected=$TRAIN_EXPECTED_BYTES"
 
 require_command cargo
 require_command hf
@@ -191,6 +204,7 @@ source_manifest_tmp="$source_manifest.tmp.$BASHPID"
   printf 'yaneuraou=%s\n' "$YANEURAOU_COMMIT"
   printf 'training_dataset=%s\n' "$TRAIN_DATASET"
   printf 'training_dataset_revision=%s\n' "$TRAIN_DATASET_REVISION"
+  printf 'training_shard_spec_sha256=%s\n' "$(sha256sum "$TRAIN_SHARD_SPEC" | awk '{print $1}')"
   printf 'validation_dataset=%s\n' "$VALIDATION_DATASET"
   printf 'validation_dataset_revision=%s\n' "$VALIDATION_DATASET_REVISION"
   printf 'progress_source_commit=%s\n' "$PROGRESS_SOURCE_COMMIT"
@@ -204,33 +218,32 @@ else
   rm -- "$source_manifest_tmp"
 fi
 
-sum_existing_shard_bytes() {
-  find "$TRAIN_SHARD_DIR" -maxdepth 1 -type f -name 'dlsuisho_unique_*.bin' \
-    -printf '%s\n' 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'
-}
-
-existing_shard_bytes=$(sum_existing_shard_bytes)
-if (( existing_shard_bytes > TRAIN_EXPECTED_BYTES )); then
-  fail "教師shardの合計sizeが想定値を超えています: ${existing_shard_bytes}B"
-fi
-
-remaining_psv_bytes=$TRAIN_EXPECTED_BYTES
 if [[ -e "$TRAIN_PSV" ]]; then
   existing_psv_bytes=$(file_size "$TRAIN_PSV")
   (( existing_psv_bytes == TRAIN_EXPECTED_BYTES )) \
     || fail "既存の連結PSVが不完全です: $TRAIN_PSV (${existing_psv_bytes}B)。上書きしません"
-  remaining_psv_bytes=0
+  required_remaining_bytes=$WORKSPACE_HEADROOM_BYTES
+elif [[ -e "$TRAIN_PARTIAL_PSV" ]]; then
+  existing_psv_bytes=$(file_size "$TRAIN_PARTIAL_PSV")
+  (( existing_psv_bytes <= TRAIN_EXPECTED_BYTES )) \
+    || fail "追記中PSVが想定sizeを超えています: $TRAIN_PARTIAL_PSV (${existing_psv_bytes}B)"
+  required_remaining_bytes=$((
+    TRAIN_EXPECTED_BYTES - existing_psv_bytes
+    + 2 * TRAIN_MAX_SHARD_BYTES
+    + WORKSPACE_HEADROOM_BYTES
+  ))
+else
+  required_remaining_bytes=$((
+    TRAIN_EXPECTED_BYTES
+    + 2 * TRAIN_MAX_SHARD_BYTES
+    + WORKSPACE_HEADROOM_BYTES
+  ))
 fi
-required_remaining_bytes=$((
-  TRAIN_EXPECTED_BYTES - existing_shard_bytes
-  + remaining_psv_bytes
-  + WORKSPACE_HEADROOM_BYTES
-))
 workspace_available_bytes=$(df -PB1 "$WORKSPACE_ROOT" | awk 'NR == 2 { print $4 }')
 [[ "$workspace_available_bytes" =~ ^[0-9]+$ ]] \
   || fail "/workspaceの空き容量を取得できませんでした"
 if (( workspace_available_bytes < required_remaining_bytes )); then
-  fail "/workspaceの空き容量不足: available=${workspace_available_bytes}B required=${required_remaining_bytes}B。500GB volumeでは不足します"
+  fail "/workspaceの空き容量不足: available=${workspace_available_bytes}B required=${required_remaining_bytes}B。1TB級volumeを指定してください"
 fi
 echo "[onstart] disk preflight: available=${workspace_available_bytes}B required=${required_remaining_bytes}B"
 
@@ -299,38 +312,136 @@ STEP
 start_step build_rshogi "$build_rshogi_body"
 
 read -r -d '' download_training_body <<'STEP' || true
-hf download "$TRAIN_DATASET" \
-  --repo-type dataset \
-  --revision "$TRAIN_DATASET_REVISION" \
-  --include 'dlsuisho_unique_*.bin' \
-  --local-dir "$TRAIN_SHARD_DIR"
-
-shopt -s nullglob
-shards=("$TRAIN_SHARD_DIR"/dlsuisho_unique_*.bin)
-(( ${#shards[@]} == TRAIN_EXPECTED_SHARDS )) \
-  || { echo "ERROR: 教師shard count=${#shards[@]} expected=$TRAIN_EXPECTED_SHARDS" >&2; exit 1; }
-
-total_bytes=0
-checksum_manifest="$MANIFEST_DIR/training-shards.sha256"
-checksum_tmp="$checksum_manifest.tmp.$BASHPID"
-[[ ! -e "$checksum_tmp" ]] || { echo "ERROR: checksum tempが既に存在します: $checksum_tmp" >&2; exit 1; }
-: >"$checksum_tmp"
-for shard in "${shards[@]}"; do
-  shard_bytes=$(stat -c '%s' "$shard")
-  (( shard_bytes % PSV_RECORD_BYTES == 0 )) \
-    || { echo "ERROR: $shardは40-byte PSV境界に揃っていません: $shard_bytes" >&2; exit 1; }
-  total_bytes=$((total_bytes + shard_bytes))
-  sha256sum "$shard" >>"$checksum_tmp"
-done
-(( total_bytes == TRAIN_EXPECTED_BYTES )) \
-  || { echo "ERROR: 教師shard total bytes=$total_bytes expected=$TRAIN_EXPECTED_BYTES" >&2; exit 1; }
-if [[ -e "$checksum_manifest" ]]; then
-  cmp -s "$checksum_tmp" "$checksum_manifest" \
-    || { echo "ERROR: 既存training-shards.sha256が再検証結果と異なります" >&2; exit 1; }
-else
-  mv "$checksum_tmp" "$checksum_manifest"
+if [[ -e "$TRAIN_PSV" ]]; then
+  [[ ! -e "$TRAIN_PARTIAL_PSV" ]] \
+    || { echo "ERROR: 完成PSVと追記中PSVが同時に存在します" >&2; exit 1; }
+  actual_bytes=$(stat -c '%s' "$TRAIN_PSV")
+  (( actual_bytes == TRAIN_EXPECTED_BYTES )) \
+    || { echo "ERROR: 完成PSV bytes=$actual_bytes expected=$TRAIN_EXPECTED_BYTES" >&2; exit 1; }
+  echo "[download_training] 完成済みPSVを再利用します"
+  exit 0
 fi
-echo "[download_training] 30 shard / $total_bytes bytesを検証しました"
+
+mkdir -p "$TRAIN_APPEND_STATE_DIR" "$TRAIN_SHARD_DIR"
+if [[ ! -e "$TRAIN_PARTIAL_PSV" ]]; then
+  shopt -s nullglob
+  existing_markers=("$TRAIN_APPEND_STATE_DIR"/*.done)
+  (( ${#existing_markers[@]} == 0 )) \
+    || { echo "ERROR: 追記中PSVが無いのに確定markerが残っています" >&2; exit 1; }
+  : >"$TRAIN_PARTIAL_PSV"
+fi
+
+# markerで確定した連続prefixだけを正とする。追記中に中断した末尾はその境界へ戻す。
+committed_bytes=0
+missing_seen=0
+while IFS=$'\t' read -r shard_name expected_bytes expected_sha; do
+  [[ -n "$shard_name" ]] || continue
+  marker="$TRAIN_APPEND_STATE_DIR/$shard_name.done"
+  expected_marker="$shard_name"$'\t'"$expected_bytes"$'\t'"$expected_sha"$'\t'"$((committed_bytes + expected_bytes))"
+  if [[ -f "$marker" ]]; then
+    (( missing_seen == 0 )) \
+      || { echo "ERROR: shard確定markerに欠番があります: $marker" >&2; exit 1; }
+    [[ "$(cat "$marker")" == "$expected_marker" ]] \
+      || { echo "ERROR: shard確定markerの内容が不正です: $marker" >&2; exit 1; }
+    committed_bytes=$((committed_bytes + expected_bytes))
+  else
+    missing_seen=1
+  fi
+done <"$TRAIN_SHARD_SPEC"
+
+partial_bytes=$(stat -c '%s' "$TRAIN_PARTIAL_PSV")
+(( partial_bytes >= committed_bytes )) \
+  || { echo "ERROR: 追記中PSVが確定済みprefixより短いです: actual=$partial_bytes committed=$committed_bytes" >&2; exit 1; }
+if (( partial_bytes > committed_bytes )); then
+  echo "[download_training] 中断した未確定末尾を切り戻します: $partial_bytes -> $committed_bytes"
+  truncate --size "$committed_bytes" "$TRAIN_PARTIAL_PSV"
+fi
+
+while IFS=$'\t' read -r shard_name expected_bytes expected_sha; do
+  [[ -n "$shard_name" ]] || continue
+  shard="$TRAIN_SHARD_DIR/$shard_name"
+  marker="$TRAIN_APPEND_STATE_DIR/$shard_name.done"
+  if [[ -f "$marker" ]]; then
+    if [[ -e "$shard" ]]; then
+      actual_bytes=$(stat -c '%s' "$shard")
+      actual_sha=$(sha256sum "$shard" | awk '{print $1}')
+      [[ "$actual_bytes" == "$expected_bytes" && "$actual_sha" == "$expected_sha" ]] \
+        || { echo "ERROR: 確定済みshardの残存fileが仕様と異なります: $shard" >&2; exit 1; }
+      if [[ "$shard" != "$TRAIN_SURVEY_SHARD" ]]; then
+        rm -- "$shard"
+      fi
+    fi
+    continue
+  fi
+
+  hf download "$TRAIN_DATASET" "$shard_name" \
+    --repo-type dataset \
+    --revision "$TRAIN_DATASET_REVISION" \
+    --local-dir "$TRAIN_SHARD_DIR"
+  [[ -f "$shard" ]] || { echo "ERROR: shardを取得できませんでした: $shard" >&2; exit 1; }
+  actual_bytes=$(stat -c '%s' "$shard")
+  (( actual_bytes == expected_bytes )) \
+    || { echo "ERROR: shard bytes=$actual_bytes expected=$expected_bytes path=$shard" >&2; exit 1; }
+  (( actual_bytes % PSV_RECORD_BYTES == 0 )) \
+    || { echo "ERROR: shardが40-byte PSV境界に揃っていません: $shard" >&2; exit 1; }
+  actual_sha=$(sha256sum "$shard" | awk '{print $1}')
+  [[ "$actual_sha" == "$expected_sha" ]] \
+    || { echo "ERROR: shard SHA-256=$actual_sha expected=$expected_sha path=$shard" >&2; exit 1; }
+
+  before_bytes=$(stat -c '%s' "$TRAIN_PARTIAL_PSV")
+  expected_after=$((before_bytes + expected_bytes))
+  python3 - "$TRAIN_PARTIAL_PSV" "$shard" <<'PY'
+import os
+import sys
+
+output, source = sys.argv[1:]
+with open(output, "ab", buffering=0) as destination:
+    with open(source, "rb") as stream:
+        while chunk := stream.read(16 * 1024 * 1024):
+            destination.write(chunk)
+    os.fsync(destination.fileno())
+PY
+  after_bytes=$(stat -c '%s' "$TRAIN_PARTIAL_PSV")
+  (( after_bytes == expected_after )) \
+    || { echo "ERROR: shard追記後のsizeが不正です: actual=$after_bytes expected=$expected_after" >&2; exit 1; }
+
+  marker_tmp="$marker.tmp.$BASHPID"
+  printf '%s\t%s\t%s\t%s\n' "$shard_name" "$expected_bytes" "$expected_sha" "$after_bytes" >"$marker_tmp"
+  mv "$marker_tmp" "$marker"
+  if [[ "$shard" == "$TRAIN_SURVEY_SHARD" ]]; then
+    echo "[download_training] $shard_nameは部分取得survey用に一時保持します"
+  else
+    rm -- "$shard"
+  fi
+  echo "[download_training] $shard_nameを検証・追記しました: cumulative=$after_bytes"
+done <"$TRAIN_SHARD_SPEC"
+
+final_bytes=$(stat -c '%s' "$TRAIN_PARTIAL_PSV")
+(( final_bytes == TRAIN_EXPECTED_BYTES )) \
+  || { echo "ERROR: 連結PSV bytes=$final_bytes expected=$TRAIN_EXPECTED_BYTES" >&2; exit 1; }
+
+append_manifest="$MANIFEST_DIR/training-inline-append.tsv"
+append_tmp="$append_manifest.tmp.$BASHPID"
+committed_bytes=0
+: >"$append_tmp"
+while IFS=$'\t' read -r shard_name expected_bytes expected_sha; do
+  [[ -n "$shard_name" ]] || continue
+  committed_bytes=$((committed_bytes + expected_bytes))
+  marker="$TRAIN_APPEND_STATE_DIR/$shard_name.done"
+  printf '%s\t%s\t%s\t%s\n' "$shard_name" "$expected_bytes" "$expected_sha" "$committed_bytes" >>"$append_tmp"
+  cmp -s "$marker" <(tail -n 1 "$append_tmp") \
+    || { echo "ERROR: 最終marker検証に失敗しました: $marker" >&2; exit 1; }
+done <"$TRAIN_SHARD_SPEC"
+if [[ -e "$append_manifest" ]]; then
+  cmp -s "$append_tmp" "$append_manifest" \
+    || { echo "ERROR: 既存training-inline-append.tsvが再検証結果と異なります" >&2; exit 1; }
+  rm -- "$append_tmp"
+else
+  mv "$append_tmp" "$append_manifest"
+fi
+
+mv "$TRAIN_PARTIAL_PSV" "$TRAIN_PSV"
+echo "[download_training] $TRAIN_EXPECTED_SHARDS shard / $final_bytes bytesを順次検証・追記しました"
 STEP
 start_step download_training "$download_training_body"
 
@@ -407,40 +518,7 @@ wait_for_step download_progress
 wait_for_step build_rshogi
 wait_for_step build_tatara
 
-shopt -s nullglob
-shards=("$TRAIN_SHARD_DIR"/dlsuisho_unique_*.bin)
-(( ${#shards[@]} == TRAIN_EXPECTED_SHARDS )) \
-  || { echo "ERROR: 教師shard count=${#shards[@]} expected=$TRAIN_EXPECTED_SHARDS" >&2; exit 1; }
-
-if [[ -e "$TRAIN_PSV" ]]; then
-  actual_bytes=$(stat -c '%s' "$TRAIN_PSV")
-  (( actual_bytes == TRAIN_EXPECTED_BYTES )) \
-    || { echo "ERROR: 既存の連結PSVが不完全です: ${actual_bytes}B。上書きしません" >&2; exit 1; }
-  echo "[prepare_data] 既存の連結PSVを再利用します"
-else
-  echo "[prepare_data] shuffle済み30 shardをファイル名順で連結します。再shuffleしません"
-  partial_psv="$TRAIN_PSV.partial"
-  [[ ! -e "$partial_psv" ]] \
-    || { echo "ERROR: 前回のpartial PSVがあります。retry-onstart-step.shの案内に従ってください: $partial_psv" >&2; exit 1; }
-  python3 - "$partial_psv" "${shards[@]}" <<'PY'
-import hashlib
-import os
-import sys
-
-output, *inputs = sys.argv[1:]
-digest = hashlib.sha256()
-with open(output, "xb", buffering=0) as destination:
-    for source in inputs:
-        with open(source, "rb") as stream:
-            while chunk := stream.read(16 * 1024 * 1024):
-                destination.write(chunk)
-                digest.update(chunk)
-    os.fsync(destination.fileno())
-print(digest.hexdigest())
-PY
-  mv "$partial_psv" "$TRAIN_PSV"
-fi
-
+[[ -f "$TRAIN_PSV" ]] || { echo "ERROR: 順次追記済み教師PSVがありません: $TRAIN_PSV" >&2; exit 1; }
 actual_bytes=$(stat -c '%s' "$TRAIN_PSV")
 (( actual_bytes == TRAIN_EXPECTED_BYTES )) \
   || { echo "ERROR: 教師PSV bytes=$actual_bytes expected=$TRAIN_EXPECTED_BYTES" >&2; exit 1; }
@@ -474,10 +552,12 @@ prepared_tmp="$prepared_manifest.tmp.$BASHPID"
   printf 'training_bytes=%s\n' "$actual_bytes"
   printf 'training_positions=%s\n' "$actual_positions"
   printf 'training_sha256=%s\n' "$training_sha"
-  printf 'training_order=filename_order_no_reshuffle\n'
+  printf 'training_order=split_000_to_split_033_inline_append_no_reshuffle\n'
+  printf 'training_append_manifest=%s\n' "$MANIFEST_DIR/training-inline-append.tsv"
+  printf 'training_append_manifest_sha256=%s\n' "$(sha256sum "$MANIFEST_DIR/training-inline-append.tsv" | awk '{print $1}')"
+  printf 'survey_shard=%s\n' "$TRAIN_SURVEY_SHARD"
   printf 'validation_psv=%s\n' "$VALIDATION_PSV"
   printf 'validation_bytes=%s\n' "$actual_validation_bytes"
-  printf 'validation_positions=%s\n' "$actual_validation_positions"
   printf 'validation_effective_positions=851968\n'
   printf 'validation_sha256=%s\n' "$validation_sha"
 } >"$prepared_tmp"
@@ -499,7 +579,7 @@ cat <<SUMMARY
   ls -la $STATE_DIR
   tail -f $LOG_DIR/download_training.log
   tail -f $LOG_DIR/prepare_data.log
-  $EXPERIMENT_ROOT/scripts/experiments/progress-legacy9-1024x16x64/onstart-status.sh
+  $EXPERIMENT_ROOT/scripts/experiments/progress8kpabs-2304x16x64/onstart-status.sh
 
 計画:
   less $PLAN_PATH
@@ -514,14 +594,15 @@ cat <<SUMMARY
   5. RUN_NAMEとPROGRESS_APPROVALを明示して$TRAIN_LAUNCHERを手動実行
 
 固定学習値:
-  batch-size=65536, batches-per-superbatch=6104, superbatches=367
+  batch-size=65536, batches-per-superbatch=6104, superbatches=421
   lr=0.000875, schedule=step, gamma=0.992, step=1
-  architecture=1024x16x64, 8 training buckets, fixed 8-way progress routing
+  architecture=2304x16x64, 8 training buckets, fixed 8-way progress routing
   export=net_to_yoがbucket 7を未使用の第9slotへ複製
   validation=ファイル856923局面、実効851968局面（65536×13 full batches）
 
 注意:
-  - 公開教師は再shuffleしません。
+  - 公開教師はsplit番号順に末尾追記し、再shuffleしません。
+  - split_000.binだけは部分取得survey用に一時保持し、本学習前に明示削除します。
   - baseline progress係数も自動採用しません。
   - 既存checkout、dataset、runを上書きしません。
   - 外部backup、自動resume、自動再起動は行いません。

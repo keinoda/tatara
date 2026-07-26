@@ -52,6 +52,8 @@
 /docs/experiments/*
 !/docs/experiments/progress-legacy9-1024x16x64/
 !/docs/experiments/progress-legacy9-1024x16x64/**
+!/docs/experiments/progress8kpabs-2304x16x64/
+!/docs/experiments/progress8kpabs-2304x16x64/**
 
 # local issue (GitHub Issue を立てない課題の spec、1 file = 1 issue)
 /docs/issue/
