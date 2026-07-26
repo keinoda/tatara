@@ -117,6 +117,7 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertEqual(value_after("--lr"), "8.75e-4")
         self.assertEqual(value_after("--lr-gamma"), "0.995")
         self.assertEqual(value_after("--lr-step"), "1")
+        self.assertEqual(value_after("--wdl"), "0")
         self.assertEqual(value_after("--ft-out"), "2304")
         self.assertEqual(value_after("--l1"), "16")
         self.assertEqual(value_after("--l2"), "64")
@@ -148,6 +149,8 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertIn('rm -- "$shard"', onstart)
         self.assertIn("gamma=0.995", onstart)
         self.assertNotIn("gamma=0.992", onstart)
+        self.assertIn("loss=WRM, wdl=0", onstart)
+        self.assertNotIn("wdl=0.3333333", onstart)
         self.assertNotIn("--include 'split_*.bin'", onstart)
         self.assertNotIn('shards=("$TRAIN_SHARD_DIR"/split_*.bin)', onstart)
 

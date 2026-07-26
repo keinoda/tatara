@@ -261,6 +261,7 @@ MONITOR_PASSWORD="$MONITOR_PASSWORD" \
 --lr-schedule step
 --lr-gamma 0.995
 --lr-step 1
+--wdl 0
 --all-optim
 --threads 16
 --save-rate 20

@@ -217,7 +217,7 @@ build_training_command() {
     --lr-schedule step
     --lr-gamma 0.995
     --lr-step 1
-    --wdl 0.3333333
+    --wdl 0
     --win-rate-model
     --wrm-in-scaling 340
     --wrm-in-offset 270

@@ -27,6 +27,7 @@
 | batches / SB | 6,104 | 既存設定を維持 |
 | 初回学習量 | 841 SB、約19.995581 epoch | 新教師の局面数に対する約20周 |
 | LR | step、`8.75e-4`、gamma `0.995`、step 1 | 20 epoch終了時まで滑らかに減衰させる |
+| WDL | `0`固定 | 教師評価値由来ターゲットだけを使う実験条件 |
 | precision | `--all-optim` | 既存判断を維持 |
 | threads | 16 | Ryzen 9 9950Xの物理16 coreに合わせる |
 | validation | floodgate 851,968局面 | 既存比較系列を維持 |

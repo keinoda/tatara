@@ -80,7 +80,7 @@ checkpoints等の余裕100GBとして約813GBを要求する。Vast.aiの`/works
 | 学習局面数 | 336,426,696,704 |
 | 実epoch | 約19.995581 |
 | LR | step、start `8.75e-4`、gamma `0.995`、every 1 SB |
-| loss | WRM、WDL `0.3333333`、既存WRM係数を維持 |
+| loss | WRM、WDL `0`、既存WRM係数を維持 |
 | optimizer | Ranger、weight decay 0 |
 | precision | `--all-optim` |
 | threads | 16 |
