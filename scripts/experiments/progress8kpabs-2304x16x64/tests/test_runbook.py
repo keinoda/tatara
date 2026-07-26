@@ -146,6 +146,8 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
         self.assertIn('truncate --size "$committed_bytes" "$TRAIN_PARTIAL_PSV"', onstart)
         self.assertIn('if [[ "$shard" == "$TRAIN_SURVEY_SHARD" ]]', onstart)
         self.assertIn('rm -- "$shard"', onstart)
+        self.assertIn("gamma=0.995", onstart)
+        self.assertNotIn("gamma=0.992", onstart)
         self.assertNotIn("--include 'split_*.bin'", onstart)
         self.assertNotIn('shards=("$TRAIN_SHARD_DIR"/split_*.bin)', onstart)
 

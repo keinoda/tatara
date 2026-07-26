@@ -604,7 +604,7 @@ cat <<SUMMARY
 
 固定学習値:
   batch-size=65536, batches-per-superbatch=6104, superbatches=841
-  lr=0.000875, schedule=step, gamma=0.992, step=1
+  lr=0.000875, schedule=step, gamma=0.995, step=1
   architecture=2304x16x64, 8 training buckets, fixed 8-way progress routing
   export=net_to_yoがbucket 7を未使用の第9slotへ複製
   validation=ファイル856923局面、実効851968局面（65536×13 full batches）
