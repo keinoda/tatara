@@ -18,6 +18,7 @@ readonly APPROVAL_ROOT="$EXPERIMENT_ROOT/progress/approved"
 readonly TRAIN_SHARD_DIR="$EXPERIMENT_ROOT/data/training/shards"
 readonly TRAIN_PSV="$EXPERIMENT_ROOT/data/training/public-teacher.psv"
 readonly TRAIN_SURVEY_SHARD="$TRAIN_SHARD_DIR/split_000.bin"
+readonly REFERENCE_PROGRESS="$EXPERIMENT_ROOT/progress/reference/progress.bin"
 readonly VALIDATION_PSV="$EXPERIMENT_ROOT/data/validation/floodgate.psv"
 readonly NNUE_TRAIN="$EXPERIMENT_ROOT/target/release/nnue-train"
 readonly NET_TO_YO="$EXPERIMENT_ROOT/target/release/net_to_yo"
@@ -35,6 +36,7 @@ readonly PROGRESS_EXPECTED_BYTES=1003104
 
 readonly TATARA_UPSTREAM_COMMIT="da3ea68d46a5c1ac0c18c10a57fef52d02788879"
 readonly RSHOGI_COMMIT="29245a1d8e4f198aba3fc832a506649221cb2f2c"
+readonly YANEURAOU_REPO="https://github.com/keinoda/YaneuraOu-private.git"
 readonly YANEURAOU_COMMIT="771fe811f877859d6851ceccfd3e04c16454e689"
 readonly TRAIN_DATASET_REVISION="8f461dd8dc4cb90c356392545a41e4e45c8f2418"
 readonly VALIDATION_DATASET_REVISION="fdd5f602db82d888a87116f087d10dd5ea8313ab"
@@ -118,6 +120,8 @@ require_source_revision() {
     || fail "Tatara upstream revisionがrunbook固定値と異なります"
   [[ "$(manifest_value "$source_manifest" rshogi)" == "$RSHOGI_COMMIT" ]] \
     || fail "rshogi revisionがrunbook固定値と異なります"
+  [[ "$(manifest_value "$source_manifest" yaneuraou_repo)" == "$YANEURAOU_REPO" ]] \
+    || fail "YaneuraOu repositoryがrunbook固定値と異なります"
 }
 
 require_single_rtx5090() {

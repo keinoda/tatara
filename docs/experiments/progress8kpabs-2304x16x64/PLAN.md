@@ -20,7 +20,8 @@ trainer本体へアーキテクチャ専用コードは追加しない。
 | 合計 | 673,002,105,840 bytes、16,825,052,646局面 |
 | record | PackedSfenValue、40 bytes |
 | validation | `takaoyamaoka/floodgate.hcpe`固定revision |
-| baseline progress | SHA-256 `d77f47e874558d42fa2d87d173de3aba054eef51bcca9c1fc9f3a8daf93630d8` |
+| YaneuraOu | private `keinoda/YaneuraOu-private`、engine commit `771fe811f877859d6851ceccfd3e04c16454e689` |
+| 既存改造版progress | commit `35752abe3035cb972ecfb98b1ce197028625c250`、SHA-256 `e7ed0eef88868335f9a46c58a121dccb5ad82a5eb1c8ee12de90365ab351e37d` |
 
 Dataset Cardには生成方法・PSV形式・shuffle方法の説明がない。取得前の監査では
 `split_000.bin`先頭10万局面をTataraでdecodeし、40-byte境界、score、結果、
@@ -48,28 +49,22 @@ progress係数の採用後、専用cleanupを実行してから本学習を開�
 checkpoints等の余裕100GBとして約813GBを要求する。Vast.aiの`/workspace`は
 1000GBを指定する。
 
-## progress係数の決定
+## progress係数の確認
 
-教師が変わるため、前回採用値を自動流用しない。`split_000.bin`からseed固定で
-400万局面を一度だけ選び、次の3集合を固定する。
+採用済みの改造版`progress.bin`を固定入力とし、`split_000.bin`からseed固定で
+400万局面を一度だけ選んで分布を確認する。通常手順ではaffine候補の生成、
+係数最適化、`progress.bin`の再作成を行わない。
 
 | 集合 | 局面数 | 用途 |
 |---|---:|---|
-| calibration | 2,000,000 | affine係数`a,b`の最適化 |
-| selection | 1,000,000 | 候補比較 |
-| final-test | 1,000,000 | 採用前の独立確認 |
+| primary | 2,000,000 | 主分布の確認 |
+| confirmation-a | 1,000,000 | 独立sampleでの再確認 |
+| confirmation-b | 1,000,000 | 独立sampleでの再確認 |
 
-比較対象は次の3種類とする。
-
-- baseline `d77f47...`
-- 前回教師で選んだ`a=1.2980837735881936`、
-  `b=-0.5975424282106219`
-- 今回のcalibration集合で新たに最適化した候補
-
-新候補は元progress値との単調性を保つ`a > 0`のaffine変換とし、目標分布は
-`11,12,13,14,14,13,12,11%`とする。baseline・候補ごとにselectionと
-final-testのbucket割合、境界fixture、係数、生成物SHA-256を提示する。
-scriptは採用を行わず、ユーザーが候補名を明示して承認manifestを作る。
+3集合のbucket割合と境界fixtureを提示する。分布が大きく崩れたと判定する
+数値閾値は自動設定しない。ユーザーが結果を確認し、大きな崩れがないと判断した場合は、
+同じSHA-256の既存改造版を承認する。大きな崩れがある場合もsurvey scriptは
+再調整せず、別途方針を決めるまで停止する。
 
 ## 学習設定
 
@@ -81,9 +76,9 @@ scriptは採用を行わず、ユーザーが候補名を明示して承認manif
 | bucket mode | `progress8kpabs` |
 | batch size | 65,536 |
 | batches / superbatch | 6,104 |
-| 初回 | 421 superbatch |
-| 学習局面数 | 168,413,364,224 |
-| 実epoch | 約10.009678 |
+| 初回 | 841 superbatch |
+| 学習局面数 | 336,426,696,704 |
+| 実epoch | 約19.995581 |
 | LR | step、start `8.75e-4`、gamma `0.992`、every 1 SB |
 | loss | WRM、WDL `0.3333333`、既存WRM係数を維持 |
 | optimizer | Ranger、weight decay 0 |
@@ -93,9 +88,8 @@ scriptは採用を行わず、ユーザーが候補名を明示して承認manif
 | validation | floodgate 851,968局面を毎SB評価 |
 | FV scale | 28 |
 
-421 SBは`65536 × 6104 × 421 / 16,825,052,646`から求める。367 SBでは
-約8.73 epochにしかならないため、教師総量に合わせて421 SBとする。
-LRの方式・開始値・gammaは変えない。
+841 SBは`65536 × 6104 × 841 / 16,825,052,646`から求めた20 epochへの
+最寄りの整数SBである。LRの方式・開始値・gammaは変えない。
 
 ## 本学習前gate
 
@@ -117,9 +111,8 @@ exportでは既存形式を維持し、training bucket 7を未使用の第9 slot
 保存済みcheckpointだけを候補にし、毎SBのtrain loss、test loss、test accuracy、
 fp16 clamp、active feature監視を確認する。自動でbestを採用しない。
 
-延長が必要な場合は、初回runを変更せず別runへresumeする。候補は約12、14、16、
-18、20 epochに対応する505、589、673、757、841 SBとする。progress.bin、
-教師SHA-256、precision、threadsは親runと一致させる。
+延長が必要な場合は、初回runを変更せず別runへresumeする。目標SBは自動決定せず、
+progress.bin、教師SHA-256、precision、threadsを親runと一致させる。
 
 ## 自動化しない操作
 

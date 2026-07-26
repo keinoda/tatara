@@ -46,7 +46,7 @@ exec env TATARA_COMMIT="$TATARA_COMMIT" bash "$target/onstart.sh"
 BOOTSTRAP
 
 readonly image_reference="$CONTAINER_IMAGE@$CONTAINER_IMAGE_DIGEST"
-readonly vast_env="-p 6001:6001 -e TATARA_COMMIT=$TATARA_COMMIT"
+readonly vast_env="-p 6001:6001 -e TATARA_COMMIT=$TATARA_COMMIT -e YANEURAOU_GITHUB_TOKEN=REPLACE_WITH_FINE_GRAINED_PAT"
 
 cat <<SETTINGS
 Vast.ai Web UI settings

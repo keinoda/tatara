@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# survey結果を確認したユーザーが、baselineまたは候補を明示承認する入口。
+# survey結果を確認したユーザーが、既存改造版progress.binを明示承認する入口。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 
 [[ -n "${SURVEY_ID:-}" ]] || fail "SURVEY_IDを明示してください"
 validate_run_name "$SURVEY_ID"
-[[ -n "${CANDIDATE_NAME:-}" ]] || fail "CANDIDATE_NAMEを明示してください（baselineも可）"
+[[ "${CANDIDATE_NAME:-}" == "baseline" ]] \
+  || fail "通常surveyで承認できるCANDIDATE_NAMEはbaselineだけです"
 validate_run_name "$CANDIDATE_NAME"
 [[ -n "${APPROVAL_NOTE:-}" ]] || fail "APPROVAL_NOTEに採否理由を明示してください"
 
@@ -36,7 +37,7 @@ selected_path=$(printf '%s\n' "$selection" | sed -n '1p')
 boundary_fixture=$(printf '%s\n' "$selection" | sed -n '2p')
 boundary_complete=$(printf '%s\n' "$selection" | sed -n '3p')
 if [[ "$selected_path" == "__BASELINE__" ]]; then
-  selected_path="$EXPERIMENT_ROOT/progress/baseline/progress.bin"
+  selected_path="$REFERENCE_PROGRESS"
 fi
 require_exact_size "$selected_path" "$PROGRESS_EXPECTED_BYTES" "選択progress.bin"
 selected_path=$(canonical_file "$selected_path")

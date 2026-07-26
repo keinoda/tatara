@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 取得完了済みの公開教師shardを一度だけ読み、明示目標に対する単調affine係数を最適化する。
+# 取得完了済みの公開教師shardを一度だけ読み、既存改造版progress.binの分布を確認する。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -13,8 +13,7 @@ validate_run_name "$SURVEY_ID"
 readonly SURVEY_DIR="$SURVEY_ROOT/$SURVEY_ID"
 [[ ! -e "$SURVEY_DIR" ]] || fail "既存surveyを上書きしません: $SURVEY_DIR"
 
-readonly BASELINE_PROGRESS="$EXPERIMENT_ROOT/progress/baseline/progress.bin"
-require_exact_size "$BASELINE_PROGRESS" "$PROGRESS_EXPECTED_BYTES" "baseline progress.bin"
+require_exact_size "$REFERENCE_PROGRESS" "$PROGRESS_EXPECTED_BYTES" "既存改造版progress.bin"
 
 shards=()
 expected_shard_sizes=()
@@ -57,58 +56,35 @@ total_shard_positions=$((total_shard_bytes / PSV_RECORD_BYTES))
   || fail "取得完了済みshardが400万局面に達していません: actual=$total_shard_positions"
 data_arg=$(IFS=,; printf '%s' "${shards[*]}")
 
-optimized_candidate_name="${OPTIMIZED_CANDIDATE_NAME:-optimized-uniform}"
-validate_run_name "$optimized_candidate_name"
-optimizer_target="uniform"
-optimizer_objective="uniform-bucket-mse"
-if [[ -n "${OPTIMIZER_TARGET_PERCENTAGES:-}" ]]; then
-  [[ -n "${OPTIMIZED_CANDIDATE_NAME:-}" ]] \
-    || fail "OPTIMIZER_TARGET_PERCENTAGES指定時はOPTIMIZED_CANDIDATE_NAMEも明示してください"
-  optimizer_target="$OPTIMIZER_TARGET_PERCENTAGES"
-  optimizer_objective="explicit-target-bucket-mse"
-fi
+[[ -z "${AFFINE_CANDIDATES:-}" ]] \
+  || fail "通常surveyではaffine候補を生成しません。分布を提示して再調整の判断を待ってください"
+[[ -z "${OPTIMIZER_TARGET_PERCENTAGES:-}" && -z "${OPTIMIZED_CANDIDATE_NAME:-}" ]] \
+  || fail "通常surveyではprogress係数を再最適化しません"
 
 command=(
   "$PROGRESS_SURVEY"
   --data "$data_arg"
-  --progress "$BASELINE_PROGRESS"
+  --progress "$REFERENCE_PROGRESS"
   --output-dir "$SURVEY_DIR"
   --seed "$SURVEY_SEED"
   --num-buckets 8
-  --optimize-affine
-  --optimize-split calibration
-  --optimized-candidate-name "$optimized_candidate_name"
-  --optimizer-grid-points 257
-  --optimizer-refinements 6
 )
-if [[ "$optimizer_target" != uniform ]]; then
-  command+=(--optimizer-target-percentages "$optimizer_target")
-fi
 
-# 3集合の配分は未決定なので推測しない。合計400万を保ち、3値すべて明示する。
-[[ -n "${CALIBRATION_SAMPLES:-}" ]] || fail "CALIBRATION_SAMPLESを明示してください"
-[[ -n "${SELECTION_SAMPLES:-}" ]] || fail "SELECTION_SAMPLESを明示してください"
-[[ -n "${FINAL_TEST_SAMPLES:-}" ]] || fail "FINAL_TEST_SAMPLESを明示してください"
-readonly CALIBRATION_SAMPLES SELECTION_SAMPLES FINAL_TEST_SAMPLES
-for count in "$CALIBRATION_SAMPLES" "$SELECTION_SAMPLES" "$FINAL_TEST_SAMPLES"; do
+# 3集合の合計400万局面を固定し、同じprogress.binを独立sampleで確認する。
+[[ -n "${PRIMARY_SAMPLES:-}" ]] || fail "PRIMARY_SAMPLESを明示してください"
+[[ -n "${CONFIRMATION_A_SAMPLES:-}" ]] || fail "CONFIRMATION_A_SAMPLESを明示してください"
+[[ -n "${CONFIRMATION_B_SAMPLES:-}" ]] || fail "CONFIRMATION_B_SAMPLESを明示してください"
+readonly PRIMARY_SAMPLES CONFIRMATION_A_SAMPLES CONFIRMATION_B_SAMPLES
+for count in "$PRIMARY_SAMPLES" "$CONFIRMATION_A_SAMPLES" "$CONFIRMATION_B_SAMPLES"; do
   [[ "$count" =~ ^[1-9][0-9]*$ ]] || fail "survey split数は1以上の整数にしてください: $count"
 done
-(( CALIBRATION_SAMPLES + SELECTION_SAMPLES + FINAL_TEST_SAMPLES == 4000000 )) \
+(( PRIMARY_SAMPLES + CONFIRMATION_A_SAMPLES + CONFIRMATION_B_SAMPLES == 4000000 )) \
   || fail "survey 3集合の合計は4,000,000局面にしてください"
 command+=(
-  --split "calibration:$CALIBRATION_SAMPLES"
-  --split "selection:$SELECTION_SAMPLES"
-  --split "final-test:$FINAL_TEST_SAMPLES"
+  --split "primary:$PRIMARY_SAMPLES"
+  --split "confirmation-a:$CONFIRMATION_A_SAMPLES"
+  --split "confirmation-b:$CONFIRMATION_B_SAMPLES"
 )
-
-# 明示候補はoptimizerとは別の補助比較に限る。通常の係数決定には指定しない。
-# 例: AFFINE_CANDIDATES='reference:1.00:-0.25'
-if [[ -n "${AFFINE_CANDIDATES:-}" ]]; then
-  read -r -a affine_candidates <<<"$AFFINE_CANDIDATES"
-  for candidate in "${affine_candidates[@]}"; do
-    command+=(--candidate "$candidate")
-  done
-fi
 
 mkdir -p "$SURVEY_ROOT"
 printf '[survey] command:'
@@ -138,19 +114,17 @@ input_shards_manifest="$SURVEY_DIR/input-shards.txt"
   printf 'survey_id=%s\n' "$SURVEY_ID"
   printf 'created_at=%s\n' "$(date -u +%FT%TZ)"
   printf 'seed=%s\n' "$SURVEY_SEED"
+  printf 'reference_progress=%s\n' "$REFERENCE_PROGRESS"
+  printf 'reference_progress_sha256=%s\n' "$(sha256_file "$REFERENCE_PROGRESS")"
   printf 'metrics=%s\n' "$SURVEY_DIR/metrics.json"
   printf 'metrics_sha256=%s\n' "$(sha256_file "$SURVEY_DIR/metrics.json")"
   printf 'sample_plan_sha256=%s\n' "$(sha256_file "$SURVEY_DIR/sample-plan.bin")"
   printf 'input_shards=%s\n' "$input_shards_manifest"
   printf 'input_shards_sha256=%s\n' "$(sha256_file "$input_shards_manifest")"
-  printf 'affine_optimization=%s\n' "$optimizer_objective"
-  printf 'optimization_split=calibration\n'
-  printf 'optimizer_target_percentages=%s\n' "$optimizer_target"
-  printf 'optimized_candidate=%s\n' "$optimized_candidate_name"
-  printf 'optimizer_grid_points=257\n'
-  printf 'optimizer_refinements=6\n'
+  printf 'affine_optimization=disabled\n'
   printf 'teacher_data_passes=1\n'
+  printf 'automatic_recalibration=false\n'
   printf 'automatic_adoption=false\n'
 } | write_manifest_atomic "$SURVEY_DIR/manifest.txt"
 
-echo "[survey] 最適化まで完了しました。metrics.jsonを提示してからapprove-progress.shを実行してください"
+echo "[survey] 既存改造版progress.binの分布確認が完了しました。metrics.jsonを提示し、再調整せず使うか判断してください"

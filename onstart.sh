@@ -5,7 +5,7 @@
 #   - bootstrapが/workspace直下へcloneした指定Tatara commitを検証
 #   - official upstreamの固定commitを設定し、専用commitがそれを含むことを検証
 #   - 公開教師34 shardを1個ずつdownload・検証し、単一PSVの末尾へ順次追記
-#   - legacy progress.binの固定commitからのdownloadとchecksum検証
+#   - 既存改造版progress.binのprivate固定commitからのdownloadとchecksum検証
 #   - Tatara/rshogiのbuild、validation PSVの生成
 #
 # 本学習、progress係数の採用、外部backupは自動実行しない。
@@ -36,6 +36,7 @@ readonly RSHOGI_REPO="https://github.com/SH11235/rshogi.git"
 readonly RSHOGI_COMMIT="29245a1d8e4f198aba3fc832a506649221cb2f2c"
 export RSHOGI_DIR="$EXPERIMENT_ROOT/.runtime/rshogi"
 
+readonly YANEURAOU_REPO="https://github.com/keinoda/YaneuraOu-private.git"
 readonly YANEURAOU_COMMIT="771fe811f877859d6851ceccfd3e04c16454e689"
 readonly CONTAINER_IMAGE="ghcr.io/keinoda/shogi-lab:cuda129-trt1011"
 readonly CONTAINER_IMAGE_DIGEST="sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876"
@@ -63,12 +64,12 @@ readonly VALIDATION_HCPE_BYTES=32563074
 readonly VALIDATION_PSV_BYTES=34276920
 readonly VALIDATION_POSITIONS=856923
 
-readonly PROGRESS_SOURCE_COMMIT="771fe811f877859d6851ceccfd3e04c16454e689"
-readonly PROGRESS_SOURCE_URL="https://raw.githubusercontent.com/keinoda/YaneuraOu/$PROGRESS_SOURCE_COMMIT/source/progress.bin"
-export BASELINE_PROGRESS_DIR="$EXPERIMENT_ROOT/progress/baseline"
-export BASELINE_PROGRESS_BIN="$BASELINE_PROGRESS_DIR/progress.bin"
-readonly BASELINE_PROGRESS_BYTES=1003104
-readonly BASELINE_PROGRESS_SHA256="d77f47e874558d42fa2d87d173de3aba054eef51bcca9c1fc9f3a8daf93630d8"
+readonly PROGRESS_SOURCE_COMMIT="35752abe3035cb972ecfb98b1ce197028625c250"
+readonly PROGRESS_SOURCE_URL="https://api.github.com/repos/keinoda/YaneuraOu-private/contents/source/progress.bin?ref=$PROGRESS_SOURCE_COMMIT"
+export REFERENCE_PROGRESS_DIR="$EXPERIMENT_ROOT/progress/reference"
+export REFERENCE_PROGRESS_BIN="$REFERENCE_PROGRESS_DIR/progress.bin"
+readonly REFERENCE_PROGRESS_BYTES=1003104
+readonly REFERENCE_PROGRESS_SHA256="e7ed0eef88868335f9a46c58a121dccb5ad82a5eb1c8ee12de90365ab351e37d"
 
 readonly PSV_RECORD_BYTES=40
 readonly WORKSPACE_HEADROOM_BYTES=100000000000
@@ -77,8 +78,9 @@ readonly WORKSPACE_HEADROOM_BYTES=100000000000
 export RSHOGI_REPO RSHOGI_COMMIT
 export TRAIN_DATASET TRAIN_DATASET_REVISION TRAIN_EXPECTED_SHARDS TRAIN_EXPECTED_BYTES TRAIN_EXPECTED_POSITIONS
 export VALIDATION_DATASET VALIDATION_DATASET_REVISION VALIDATION_HCPE_BYTES VALIDATION_PSV_BYTES VALIDATION_POSITIONS
+export YANEURAOU_REPO
 export PROGRESS_SOURCE_COMMIT PROGRESS_SOURCE_URL
-export BASELINE_PROGRESS_BYTES BASELINE_PROGRESS_SHA256
+export REFERENCE_PROGRESS_BYTES REFERENCE_PROGRESS_SHA256
 export PSV_RECORD_BYTES
 
 fail() {
@@ -150,7 +152,7 @@ mkdir -p \
   "$HF_HOME" \
   "$TRAIN_SHARD_DIR" \
   "$VALIDATION_DIR" \
-  "$BASELINE_PROGRESS_DIR" \
+  "$REFERENCE_PROGRESS_DIR" \
   "$EXPERIMENT_ROOT/progress/candidates" \
   "$EXPERIMENT_ROOT/survey" \
   "$EXPERIMENT_ROOT/runs"
@@ -201,6 +203,7 @@ source_manifest_tmp="$source_manifest.tmp.$BASHPID"
   printf 'tatara=%s\n' "$tatara_revision"
   printf 'tatara_upstream=%s\n' "$TATARA_UPSTREAM_COMMIT"
   printf 'rshogi=%s\n' "$RSHOGI_COMMIT"
+  printf 'yaneuraou_repo=%s\n' "$YANEURAOU_REPO"
   printf 'yaneuraou=%s\n' "$YANEURAOU_COMMIT"
   printf 'training_dataset=%s\n' "$TRAIN_DATASET"
   printf 'training_dataset_revision=%s\n' "$TRAIN_DATASET_REVISION"
@@ -467,35 +470,41 @@ STEP
 start_step download_validation "$download_validation_body"
 
 read -r -d '' download_progress_body <<'STEP' || true
-if [[ -e "$BASELINE_PROGRESS_BIN" ]]; then
-  actual_bytes=$(stat -c '%s' "$BASELINE_PROGRESS_BIN")
-  actual_sha=$(sha256sum "$BASELINE_PROGRESS_BIN" | awk '{ print $1 }')
-  (( actual_bytes == BASELINE_PROGRESS_BYTES )) \
+if [[ -e "$REFERENCE_PROGRESS_BIN" ]]; then
+  actual_bytes=$(stat -c '%s' "$REFERENCE_PROGRESS_BIN")
+  actual_sha=$(sha256sum "$REFERENCE_PROGRESS_BIN" | awk '{ print $1 }')
+  (( actual_bytes == REFERENCE_PROGRESS_BYTES )) \
     || { echo "ERROR: 既存progress.binのsizeが不正です: ${actual_bytes}B" >&2; exit 1; }
-  [[ "$actual_sha" == "$BASELINE_PROGRESS_SHA256" ]] \
+  [[ "$actual_sha" == "$REFERENCE_PROGRESS_SHA256" ]] \
     || { echo "ERROR: 既存progress.binのSHA-256が不正です: $actual_sha" >&2; exit 1; }
 else
-  curl --fail --location --retry 5 \
-    --output "$BASELINE_PROGRESS_BIN" "$PROGRESS_SOURCE_URL"
+  : "${YANEURAOU_GITHUB_TOKEN:?YaneuraOu-privateを読むfine-grained tokenをVast.ai環境へ指定してください}"
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$YANEURAOU_GITHUB_TOKEN"
+    printf 'header = "Accept: application/vnd.github.raw+json"\n'
+  } | curl --config - --fail --location --retry 5 \
+    --output "$REFERENCE_PROGRESS_BIN" "$PROGRESS_SOURCE_URL"
 fi
-actual_bytes=$(stat -c '%s' "$BASELINE_PROGRESS_BIN")
-actual_sha=$(sha256sum "$BASELINE_PROGRESS_BIN" | awk '{ print $1 }')
-(( actual_bytes == BASELINE_PROGRESS_BYTES )) \
-  || { echo "ERROR: progress.bin size=$actual_bytes expected=$BASELINE_PROGRESS_BYTES" >&2; exit 1; }
-[[ "$actual_sha" == "$BASELINE_PROGRESS_SHA256" ]] \
-  || { echo "ERROR: progress.bin SHA-256=$actual_sha expected=$BASELINE_PROGRESS_SHA256" >&2; exit 1; }
-baseline_manifest="$MANIFEST_DIR/baseline-progress.txt"
-baseline_tmp="$baseline_manifest.tmp.$BASHPID"
+actual_bytes=$(stat -c '%s' "$REFERENCE_PROGRESS_BIN")
+actual_sha=$(sha256sum "$REFERENCE_PROGRESS_BIN" | awk '{ print $1 }')
+(( actual_bytes == REFERENCE_PROGRESS_BYTES )) \
+  || { echo "ERROR: progress.bin size=$actual_bytes expected=$REFERENCE_PROGRESS_BYTES" >&2; exit 1; }
+[[ "$actual_sha" == "$REFERENCE_PROGRESS_SHA256" ]] \
+  || { echo "ERROR: progress.bin SHA-256=$actual_sha expected=$REFERENCE_PROGRESS_SHA256" >&2; exit 1; }
+reference_manifest="$MANIFEST_DIR/reference-progress.txt"
+reference_tmp="$reference_manifest.tmp.$BASHPID"
 {
+  printf 'source_repo=%s\n' "$YANEURAOU_REPO"
   printf 'source_commit=%s\n' "$PROGRESS_SOURCE_COMMIT"
   printf 'bytes=%s\n' "$actual_bytes"
   printf 'sha256=%s\n' "$actual_sha"
-} >"$baseline_tmp"
-if [[ -e "$baseline_manifest" ]]; then
-  cmp -s "$baseline_tmp" "$baseline_manifest" \
-    || { echo "ERROR: 既存baseline-progress.txtが再検証結果と異なります" >&2; exit 1; }
+} >"$reference_tmp"
+if [[ -e "$reference_manifest" ]]; then
+  cmp -s "$reference_tmp" "$reference_manifest" \
+    || { echo "ERROR: 既存reference-progress.txtが再検証結果と異なります" >&2; exit 1; }
+  rm -- "$reference_tmp"
 else
-  mv "$baseline_tmp" "$baseline_manifest"
+  mv "$reference_tmp" "$reference_manifest"
 fi
 STEP
 start_step download_progress "$download_progress_body"
@@ -588,13 +597,13 @@ cat <<SUMMARY
 
 次のgate:
   1. prepare_data.doneを確認
-  2. 完成shardから校正/検証sampleを抽出してbaseline分布とaffine候補をsurvey
-  3. survey結果を提示し、使用するprogress.binをユーザーが明示選択
+  2. 完成shardから400万局面を抽出して既存改造版progress.binの分布をsurvey
+  3. survey結果を提示し、大きな崩れがなければ既存改造版progress.binを明示承認
   4. GPU smoke / resume / converter / monitor試験を各scriptで実行
   5. RUN_NAMEとPROGRESS_APPROVALを明示して$TRAIN_LAUNCHERを手動実行
 
 固定学習値:
-  batch-size=65536, batches-per-superbatch=6104, superbatches=421
+  batch-size=65536, batches-per-superbatch=6104, superbatches=841
   lr=0.000875, schedule=step, gamma=0.992, step=1
   architecture=2304x16x64, 8 training buckets, fixed 8-way progress routing
   export=net_to_yoがbucket 7を未使用の第9slotへ複製
@@ -603,7 +612,7 @@ cat <<SUMMARY
 注意:
   - 公開教師はsplit番号順に末尾追記し、再shuffleしません。
   - split_000.binだけは部分取得survey用に一時保持し、本学習前に明示削除します。
-  - baseline progress係数も自動採用しません。
+  - surveyは既存改造版progress.binを再生成・再最適化しません。
   - 既存checkout、dataset、runを上書きしません。
   - 外部backup、自動resume、自動再起動は行いません。
 SUMMARY

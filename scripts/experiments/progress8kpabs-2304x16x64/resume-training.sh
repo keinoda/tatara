@@ -9,10 +9,8 @@ require_run_name
 validate_run_name "$PARENT_RUN_NAME"
 [[ -n "${RESUME_CHECKPOINT:-}" ]] || fail "RESUME_CHECKPOINTを明示してください"
 [[ -n "${TARGET_SB:-}" ]] || fail "TARGET_SBを明示してください"
-case "$TARGET_SB" in
-  505|589|673|757|841) ;;
-  *) fail "TARGET_SBは505, 589, 673, 757, 841のいずれかです: $TARGET_SB" ;;
-esac
+[[ "$TARGET_SB" =~ ^[1-9][0-9]*$ ]] || fail "TARGET_SBは正の整数にしてください: $TARGET_SB"
+(( TARGET_SB > 841 )) || fail "TARGET_SBは初回学習の841より大きい必要があります: $TARGET_SB"
 require_source_revision
 gpu=$(require_single_rtx5090)
 require_command curl

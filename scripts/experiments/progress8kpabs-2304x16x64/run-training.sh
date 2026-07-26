@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 全gate完了後に初回421 SB学習を専用tmuxで開始する。
+# 全gate完了後に初回841 SB学習を専用tmuxで開始する。
 
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
@@ -61,7 +61,7 @@ tmux has-session -t "$TRAIN_SESSION" 2>/dev/null && fail "tmux sessionが既に�
 COMMAND_DATA="$TRAIN_PSV"
 COMMAND_OUTPUT="$CHECKPOINT_DIR"
 COMMAND_NET_ID="$RUN_NAME"
-COMMAND_SUPERBATCHES=421
+COMMAND_SUPERBATCHES=841
 COMMAND_BATCHES_PER_SB=6104
 COMMAND_BATCH_SIZE=65536
 COMMAND_THREADS="$threads"
@@ -108,6 +108,6 @@ tmux new-session -d -s "$TRAIN_SESSION" "bash -lc $(printf '%q' "$tmux_body")"
 date -u +%FT%TZ >"$RUN_STATE_DIR/training.started"
 
 echo "[train] tmux=$TRAIN_SESSION run=$RUN_NAME precision=$precision threads=$threads"
-echo "[train] 421 SB × 6104 batch/SB × 65536 position/batch = 168,413,364,224局面"
-echo "[train] 約10.009678 epoch。自動resume・自動stop・外部backupは行いません"
+echo "[train] 841 SB × 6104 batch/SB × 65536 position/batch = 336,426,696,704局面"
+echo "[train] 約19.995581 epoch。自動resume・自動stop・外部backupは行いません"
 echo "[train] 監視: tmux attach -t $TRAIN_SESSION / tail -f $LOG_DIR/train.log"

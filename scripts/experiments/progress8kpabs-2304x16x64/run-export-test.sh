@@ -6,6 +6,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 
 require_run_name
 require_source_revision
+require_command git
+require_command mktemp
 progress_bin=$(require_progress_approval)
 readonly GATE_DIR="$(gate_dir_for_run "$RUN_NAME")"
 require_gate "$GATE_DIR" smoke
@@ -60,7 +62,7 @@ fi
 
 readonly YANEURAOU_DIR="$EXPERIMENT_ROOT/.runtime/YaneuraOu-$YANEURAOU_COMMIT"
 if [[ -d "$YANEURAOU_DIR/.git" ]]; then
-  [[ "$(git -C "$YANEURAOU_DIR" remote get-url origin)" == "https://github.com/keinoda/YaneuraOu.git" ]] \
+  [[ "$(git -C "$YANEURAOU_DIR" remote get-url origin)" == "$YANEURAOU_REPO" ]] \
     || fail "YaneuraOu originが想定外です"
   [[ "$(git -C "$YANEURAOU_DIR" rev-parse HEAD)" == "$YANEURAOU_COMMIT" ]] \
     || fail "YaneuraOu revisionが固定値と異なります"
@@ -68,7 +70,23 @@ if [[ -d "$YANEURAOU_DIR/.git" ]]; then
     || fail "YaneuraOu checkoutにtracked変更があります"
 else
   [[ ! -e "$YANEURAOU_DIR" ]] || fail "$YANEURAOU_DIRはGit repositoryではありません"
-  git clone --no-checkout https://github.com/keinoda/YaneuraOu.git "$YANEURAOU_DIR"
+  [[ -n "${YANEURAOU_GITHUB_TOKEN:-}" ]] \
+    || fail "YaneuraOu-privateをcloneするfine-grained tokenをYANEURAOU_GITHUB_TOKENへ指定してください"
+  askpass=$(mktemp "$EXPERIMENT_ROOT/.runtime/yaneuraou-askpass.XXXXXX")
+  trap 'rm -f -- "$askpass"' EXIT
+  cat >"$askpass" <<'ASKPASS'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' 'x-access-token' ;;
+  *Password*) printf '%s\n' "${YANEURAOU_GITHUB_TOKEN:?}" ;;
+  *) exit 1 ;;
+esac
+ASKPASS
+  chmod 700 "$askpass"
+  GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+    git clone --no-checkout "$YANEURAOU_REPO" "$YANEURAOU_DIR"
+  rm -f -- "$askpass"
+  trap - EXIT
   git -C "$YANEURAOU_DIR" checkout --detach "$YANEURAOU_COMMIT"
 fi
 
@@ -97,6 +115,7 @@ python3 "$EXPERIMENT_SCRIPT_DIR/yaneuraou-smoke.py" \
   printf 'tatara_input_sha256=%s\n' "$(sha256_file "$input_bin")"
   printf 'yaneuraou_network=%s\n' "$output_bin"
   printf 'yaneuraou_network_sha256=%s\n' "$(sha256_file "$output_bin")"
+  printf 'yaneuraou_repo=%s\n' "$YANEURAOU_REPO"
   printf 'yaneuraou_commit=%s\n' "$YANEURAOU_COMMIT"
   printf 'yaneuraou_engine_sha256=%s\n' "$(sha256_file "$ENGINE")"
   printf 'progress_sha256=%s\n' "$(sha256_file "$progress_bin")"

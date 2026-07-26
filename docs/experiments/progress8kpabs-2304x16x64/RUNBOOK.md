@@ -9,6 +9,7 @@
 - CPU: Ryzen 9 9950X、学習threads 16
 - volume: 1000GB、`/workspace`
 - monitor port: 6001
+- YaneuraOu: private `keinoda/YaneuraOu-private`
 
 branch先端の40桁SHAを`TATARA_COMMIT`へ指定する。branch名だけで起動せず、
 clone直後にremote branch先端とSHAが一致することを検証してからdetached checkoutする。
@@ -30,7 +31,11 @@ Web UIには次を設定する。
 | Image | scriptが表示するdigest付きimage |
 | Container disk | 40GB |
 | Volume | 1000GB、`/workspace` |
-| Docker Options | `-p 6001:6001 -e TATARA_COMMIT=<40桁SHA>` |
+| Docker Options | `-p 6001:6001 -e TATARA_COMMIT=<40桁SHA> -e YANEURAOU_GITHUB_TOKEN=<fine-grained PAT>` |
+
+`YANEURAOU_GITHUB_TOKEN`には`keinoda/YaneuraOu-private`のContents readだけを
+許可したfine-grained tokenを指定する。scriptはtokenをGit remote、manifest、
+logへ書き込まない。
 
 On-start Scriptは次の形にする。
 
@@ -105,35 +110,35 @@ test -f .onstart/training-append/split_000.bin.done
 test -x target/release/progress-bucket-survey
 ```
 
-前回採用候補も補助比較に含め、400万局面を固定して新候補を最適化する。
+既存改造版`progress.bin`について、400万局面を固定抽出して分布を確認する。通常手順では候補生成や
+係数最適化を行わない。
 
 ```bash
-SURVEY_ID=teacher-20260726-center \
+SURVEY_ID=teacher-20260726-existing-progress \
 SURVEY_SEED=20260726 \
-CALIBRATION_SAMPLES=2000000 \
-SELECTION_SAMPLES=1000000 \
-FINAL_TEST_SAMPLES=1000000 \
-OPTIMIZER_TARGET_PERCENTAGES=11,12,13,14,14,13,12,11 \
-OPTIMIZED_CANDIDATE_NAME=optimized-center-gentle \
-AFFINE_CANDIDATES='previous-selected:1.2980837735881936:-0.5975424282106219' \
+PRIMARY_SAMPLES=2000000 \
+CONFIRMATION_A_SAMPLES=1000000 \
+CONFIRMATION_B_SAMPLES=1000000 \
   scripts/experiments/progress8kpabs-2304x16x64/run-survey.sh
 ```
 
 結果:
 
 ```bash
-python3 -m json.tool survey/teacher-20260726-center/metrics.json | less
-cat survey/teacher-20260726-center/manifest.txt
-cat survey/teacher-20260726-center/input-shards.txt
+python3 -m json.tool survey/teacher-20260726-existing-progress/metrics.json | less
+cat survey/teacher-20260726-existing-progress/manifest.txt
+cat survey/teacher-20260726-existing-progress/input-shards.txt
 ```
 
-baseline、`previous-selected`、`optimized-center-gentle`のcalibration・selection・
-final-test分布と境界fixtureを提示する。採用候補はユーザー確認後に指定する。
+metrics上の`baseline`は未改造版ではなく、SHA-256が`e7ed0eef...`の既存改造版を
+指す。primary、confirmation-a、confirmation-bの分布と境界fixtureを提示する。
+数値閾値は自動設定しない。大きな崩れがないとユーザーが判断した場合だけ承認する。
+大きな崩れがある場合は再最適化せず停止する。
 
 ```bash
-SURVEY_ID=teacher-20260726-center \
-CANDIDATE_NAME=<baseline|previous-selected|optimized-center-gentle> \
-APPROVAL_NOTE='<採用理由>' \
+SURVEY_ID=teacher-20260726-existing-progress \
+CANDIDATE_NAME=baseline \
+APPROVAL_NOTE='<分布確認結果>' \
   scripts/experiments/progress8kpabs-2304x16x64/approve-progress.sh
 ```
 
@@ -144,6 +149,7 @@ APPROVAL_NOTE='<採用理由>' \
 ```bash
 test -f .onstart/prepare_data.done
 cat manifests/source-revisions.txt
+cat manifests/reference-progress.txt
 cat manifests/training-inline-append.tsv
 cat manifests/prepared-data.txt
 stat -c '%n %s' data/training/public-teacher.psv
@@ -162,7 +168,7 @@ stat -c '%n %s' data/training/public-teacher.psv
 共通値:
 
 ```bash
-export RUN_NAME=progress8kpabs-2304x16x64-10epoch
+export RUN_NAME=progress8kpabs-2304x16x64-20epoch
 export PROGRESS_APPROVAL=/workspace/progress8kpabs-2304x16x64-training/progress/approved/<承認manifest>.txt
 ```
 
@@ -188,6 +194,7 @@ scripts/experiments/progress8kpabs-2304x16x64/run-resume-drill.sh
 YaneuraOu形式変換と固定node探索:
 
 ```bash
+export YANEURAOU_GITHUB_TOKEN='<fine-grained PAT>'
 scripts/experiments/progress8kpabs-2304x16x64/run-export-test.sh
 ```
 
@@ -249,7 +256,7 @@ MONITOR_PASSWORD="$MONITOR_PASSWORD" \
 ```text
 --batch-size 65536
 --batches-per-superbatch 6104
---superbatches 421
+--superbatches 841
 --lr 8.75e-4
 --lr-schedule step
 --lr-gamma 0.992
@@ -286,12 +293,11 @@ python3 scripts/experiments/progress8kpabs-2304x16x64/select-saved-checkpoint.py
 PARENT_RUN_NAME="$RUN_NAME" \
 RUN_NAME=progress8kpabs-2304x16x64-<target>sb \
 RESUME_CHECKPOINT=/workspace/progress8kpabs-2304x16x64-training/runs/<parent>/checkpoints/<raw>.ckpt \
-TARGET_SB=<505|589|673|757|841> \
+TARGET_SB=<841より大きいSB> \
 PROGRESS_APPROVAL="$PROGRESS_APPROVAL" \
 MONITOR_USER="$MONITOR_USER" \
 MONITOR_PASSWORD="$MONITOR_PASSWORD" \
   scripts/experiments/progress8kpabs-2304x16x64/resume-training.sh
 ```
 
-候補は約12、14、16、18、20 epochに対応する。延長判断とcheckpoint採用は
-validation曲線を提示してから行う。
+延長判断、目標SB、checkpoint採用はvalidation曲線を提示してから行う。

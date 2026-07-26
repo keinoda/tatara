@@ -73,6 +73,10 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
             generated,
         )
         self.assertIn(f"-p 6001:6001 -e TATARA_COMMIT={remote}", generated)
+        self.assertIn(
+            "-e YANEURAOU_GITHUB_TOKEN=REPLACE_WITH_FINE_GRAINED_PAT",
+            generated,
+        )
         self.assertNotIn("vastai create instance", generated)
         self.assertNotIn("/tmp/", generated)
 
@@ -82,7 +86,7 @@ source {SCRIPT_DIR / 'lib.sh'!s}
 COMMAND_DATA=/tmp/train.psv
 COMMAND_OUTPUT=/tmp/output
 COMMAND_NET_ID=test-run
-COMMAND_SUPERBATCHES=421
+COMMAND_SUPERBATCHES=841
 COMMAND_BATCHES_PER_SB=6104
 COMMAND_BATCH_SIZE=65536
 COMMAND_THREADS=16
@@ -107,7 +111,7 @@ printf '%s\n' "${{TRAINING_COMMAND[@]}}"
 
         self.assertEqual(value_after("--batch-size"), "65536")
         self.assertEqual(value_after("--batches-per-superbatch"), "6104")
-        self.assertEqual(value_after("--superbatches"), "421")
+        self.assertEqual(value_after("--superbatches"), "841")
         self.assertEqual(value_after("--test-positions"), "851968")
         self.assertEqual(value_after("--lr-schedule"), "step")
         self.assertEqual(value_after("--lr"), "8.75e-4")
@@ -300,11 +304,10 @@ set -Eeuo pipefail
         self.assertIn('total_shard_positions >= 4000000', script)
         self.assertIn('input-shards.txt', script)
         self.assertIn('input_shards_sha256', script)
-        self.assertIn('--optimize-affine', script)
-        self.assertIn('--optimize-split calibration', script)
-        self.assertIn('--optimized-candidate-name "$optimized_candidate_name"', script)
-        self.assertIn('OPTIMIZER_TARGET_PERCENTAGES', script)
-        self.assertIn('--optimizer-target-percentages', script)
+        self.assertNotIn('--optimize-affine', script)
+        self.assertNotIn('--candidate', script)
+        self.assertIn('automatic_recalibration=false', script)
+        self.assertIn('通常surveyではprogress係数を再最適化しません', script)
         self.assertIn('teacher_data_passes=1', script)
         self.assertIn("全download完了を待たず", plan)
         self.assertIn("全34 shardの完了前", runbook)
@@ -342,9 +345,9 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             )
             survey.chmod(0o755)
 
-            baseline = root / "progress/baseline/progress.bin"
-            baseline.parent.mkdir(parents=True)
-            with baseline.open("wb") as stream:
+            reference = root / "progress/reference/progress.bin"
+            reference.parent.mkdir(parents=True)
+            with reference.open("wb") as stream:
                 stream.truncate(1_003_104)
             shard = root / "data/training/shards/split_000.bin"
             shard.parent.mkdir(parents=True)
@@ -356,9 +359,9 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                 {
                     "SURVEY_ID": "partial-one-shard",
                     "SURVEY_SEED": "20260721",
-                    "CALIBRATION_SAMPLES": "2000000",
-                    "SELECTION_SAMPLES": "1000000",
-                    "FINAL_TEST_SAMPLES": "1000000",
+                    "PRIMARY_SAMPLES": "2000000",
+                    "CONFIRMATION_A_SAMPLES": "1000000",
+                    "CONFIRMATION_B_SAMPLES": "1000000",
                     "BASHPID": "12345",
                 }
             )
@@ -384,9 +387,9 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             self.assertIn("total_positions=4000000", input_snapshot)
             self.assertIn(str(shard), input_snapshot)
             self.assertIn("input_shards_sha256=", manifest)
-            self.assertIn("affine_optimization=uniform-bucket-mse", manifest)
-            self.assertIn("optimizer_target_percentages=uniform", manifest)
-            self.assertIn("optimized_candidate=optimized-uniform", manifest)
+            self.assertIn("affine_optimization=disabled", manifest)
+            self.assertIn("automatic_recalibration=false", manifest)
+            self.assertIn("reference_progress_sha256=", manifest)
             self.assertIn("automatic_adoption=false", manifest)
 
             second_shard = root / "data/training/shards/split_001.bin"
@@ -421,12 +424,12 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
 
             environment.update(
                 {
-                    "SURVEY_ID": "center-target-one-shard",
+                    "SURVEY_ID": "optimizer-must-stop",
                     "OPTIMIZER_TARGET_PERCENTAGES": "11,12,13,14,14,13,12,11",
                     "OPTIMIZED_CANDIDATE_NAME": "optimized-center-gentle",
                 }
             )
-            center = subprocess.run(
+            optimizer_attempt = subprocess.run(
                 [str(copied_script_dir / "run-survey.sh")],
                 check=False,
                 text=True,
@@ -434,28 +437,12 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                 cwd=root,
                 env=environment,
             )
-            self.assertEqual(
-                center.returncode,
-                0,
-                f"stdout:\n{center.stdout}\nstderr:\n{center.stderr}",
-            )
+            self.assertNotEqual(optimizer_attempt.returncode, 0)
             self.assertIn(
-                "--optimizer-target-percentages 11\\,12\\,13\\,14\\,14\\,13\\,12\\,11",
-                center.stdout,
+                "通常surveyではprogress係数を再最適化しません",
+                optimizer_attempt.stderr,
             )
-            center_manifest = (
-                root / "survey/center-target-one-shard/manifest.txt"
-            ).read_text(encoding="utf-8")
-            self.assertIn(
-                "optimizer_target_percentages=11,12,13,14,14,13,12,11",
-                center_manifest,
-            )
-            self.assertIn(
-                "affine_optimization=explicit-target-bucket-mse", center_manifest
-            )
-            self.assertIn(
-                "optimized_candidate=optimized-center-gentle", center_manifest
-            )
+            self.assertFalse((root / "survey/optimizer-must-stop").exists())
 
     def test_monitor_renders_atomic_snapshot(self) -> None:
         monitor = load_module("tatara_monitor", SCRIPT_DIR / "monitor.py")
@@ -639,8 +626,40 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
         )
         self.assertIn('finalization_mode="existing-conversion-artifacts"', export)
         self.assertIn("EXPORT_TRANSCRIPT_NAME", export)
+        self.assertIn(
+            'readonly YANEURAOU_REPO="https://github.com/keinoda/YaneuraOu-private.git"',
+            (SCRIPT_DIR / "lib.sh").read_text(encoding="utf-8"),
+        )
+        self.assertIn('GIT_ASKPASS="$askpass"', export)
+        self.assertNotIn("https://github.com/keinoda/YaneuraOu.git", export)
         self.assertIn('send(process, "setoption name BookFile value no_book")', smoke)
         self.assertIn("CONTINUE_EXISTING_EXPORT=1", runbook)
+
+    def test_modified_progress_is_fixed_without_automatic_recalibration(self) -> None:
+        onstart = (REPO_ROOT / "onstart.sh").read_text(encoding="utf-8")
+        survey = (SCRIPT_DIR / "run-survey.sh").read_text(encoding="utf-8")
+        approve = (SCRIPT_DIR / "approve-progress.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'readonly PROGRESS_SOURCE_COMMIT="35752abe3035cb972ecfb98b1ce197028625c250"',
+            onstart,
+        )
+        self.assertIn(
+            'readonly REFERENCE_PROGRESS_SHA256="e7ed0eef88868335f9a46c58a121dccb5ad82a5eb1c8ee12de90365ab351e37d"',
+            onstart,
+        )
+        self.assertIn(
+            "api.github.com/repos/keinoda/YaneuraOu-private/contents/source/progress.bin",
+            onstart,
+        )
+        self.assertNotIn("raw.githubusercontent.com/keinoda/YaneuraOu/", onstart)
+        self.assertIn("--progress \"$REFERENCE_PROGRESS\"", survey)
+        self.assertNotIn("--optimize-affine", survey)
+        self.assertIn('CANDIDATE_NAME:-}" == "baseline"', approve)
+
+    def test_resume_requires_target_after_initial_twenty_epochs(self) -> None:
+        resume = (SCRIPT_DIR / "resume-training.sh").read_text(encoding="utf-8")
+        self.assertIn("(( TARGET_SB > 841 ))", resume)
+        self.assertNotIn("505|589|673|757|841", resume)
 
     def test_yaneuraou_smoke_disables_book_and_gets_all_bestmoves(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

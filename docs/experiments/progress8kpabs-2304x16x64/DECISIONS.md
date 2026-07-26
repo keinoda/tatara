@@ -17,13 +17,15 @@
 | architecture | HalfKA_hm merged `2304x16x64` | ユーザー指定、既存runtime可変幅で対応済み |
 | training buckets | 8 | `progress8kpabs`の既存動作を維持 |
 | export slots | 9 | bucket 7をslot 8へ複製する既存形式 |
-| baseline progress | SHA-256 `d77f47...` | 比較の基準 |
-| 前回候補 | `a=1.2980837735881936`、`b=-0.5975424282106219` | 新教師での比較対象に限る |
-| 新候補目標 | `11,12,13,14,14,13,12,11%` | 中央をやや厚くする合意済み目標 |
-| 係数採用 | survey提示後に手動承認 | 自動採用しない |
+| YaneuraOu repository | private `keinoda/YaneuraOu-private` | engineとprogress.binの正本 |
+| engine commit | `771fe811f877859d6851ceccfd3e04c16454e689` | 既存の変換・読込試験条件を維持 |
+| 既存改造版progress | commit `35752abe3035cb972ecfb98b1ce197028625c250`、SHA-256 `e7ed0eef...` | 採用済み配布評価関数と同一fileを固定 |
+| progress survey | 400万局面で既存fileだけを評価 | 通常手順では候補生成・係数最適化を行わない |
+| progress再調整 | 分布を提示後、ユーザーが大きな崩れと判断した場合だけ別途計画 | 数値閾値や自動判定を新設しない |
+| private認証 | fine-grained tokenのContents readだけを一時利用 | tokenをGit remote・manifest・logへ保存しない |
 | batch size | 65,536 | 既存設定を維持 |
 | batches / SB | 6,104 | 既存設定を維持 |
-| 初回学習量 | 421 SB、約10.009678 epoch | 新教師の局面数から再計算 |
+| 初回学習量 | 841 SB、約19.995581 epoch | 新教師の局面数に対する約20周 |
 | LR | step、`8.75e-4`、gamma `0.992`、step 1 | Tatara標準の既存設定を維持 |
 | precision | `--all-optim` | 既存判断を維持 |
 | threads | 16 | Ryzen 9 9950Xの物理16 coreに合わせる |
