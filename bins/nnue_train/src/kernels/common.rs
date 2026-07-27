@@ -473,6 +473,67 @@ pub fn radam_step(
     );
 }
 
+/// `radam_step`と同じ更新を、各bufferの`[offset, offset + n)`だけへ適用する。
+/// progress8ek追加学習で既存slotをoptimizerの対象外に保つための専用経路。
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::manual_clamp)]
+#[kernel]
+pub fn radam_step_range(
+    mut weights: DisjointSlice<f32>,
+    mut m: DisjointSlice<f32>,
+    mut v: DisjointSlice<f32>,
+    mut grad: DisjointSlice<f32>,
+    lr: f32,
+    step_size: f32,
+    denom: i32,
+    decay: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    min_w: f32,
+    max_w: f32,
+    offset: u32,
+    n: u32,
+) {
+    let local = thread::index_1d().get();
+    if local >= n as usize {
+        return;
+    }
+    let i = offset as usize + local;
+    if i >= weights.len() || i >= m.len() || i >= v.len() || i >= grad.len() {
+        return;
+    }
+    // SAFETY: 4 bufferのboundsを確認済みで、1D threadは一意なiだけを更新する。
+    let (w_ref, m_ref, v_ref, g_ref) = unsafe {
+        (
+            weights.get_unchecked_mut(i),
+            m.get_unchecked_mut(i),
+            v.get_unchecked_mut(i),
+            grad.get_unchecked_mut(i),
+        )
+    };
+    let g = *g_ref;
+    let rate = lr * step_size;
+    let mut p = *w_ref * (1.0_f32 - decay * rate);
+    let mi = beta1 * *m_ref + (1.0_f32 - beta1) * g;
+    let vi = beta2 * *v_ref + (1.0_f32 - beta2) * g * g;
+    *m_ref = mi;
+    *v_ref = vi;
+    let mut val = mi;
+    if denom != 0 {
+        val /= vi.sqrt() + eps;
+    }
+    p -= rate * val;
+    *w_ref = if p < min_w {
+        min_w
+    } else if p > max_w {
+        max_w
+    } else {
+        p
+    };
+    *g_ref = 0.0_f32;
+}
+
 /// `radam_step` の FP16 mirror 同時更新 variant (`--ft-fp16` の `ft_w` 専用)。
 ///
 /// forward は `ft_w` の FP16 mirror (`ft_w_h`) を読む。mirror を別 `cast_f32_to_f16`
@@ -720,6 +781,30 @@ pub fn ranger_lookahead_lerp(
         *w_ref = new_w;
         *s_ref = new_w;
     }
+}
+
+/// Ranger lookaheadを各bufferの`[offset, offset + n)`だけへ適用する。
+#[kernel]
+pub fn ranger_lookahead_lerp_range(
+    mut weights: DisjointSlice<f32>,
+    mut slow: DisjointSlice<f32>,
+    alpha: f32,
+    offset: u32,
+    n: u32,
+) {
+    let local = thread::index_1d().get();
+    if local >= n as usize {
+        return;
+    }
+    let i = offset as usize + local;
+    if i >= weights.len() || i >= slow.len() {
+        return;
+    }
+    // SAFETY: 両bufferのboundsを確認済みで、1D threadは一意なiだけを更新する。
+    let (w_ref, s_ref) = unsafe { (weights.get_unchecked_mut(i), slow.get_unchecked_mut(i)) };
+    let new_w = alpha * *w_ref + (1.0_f32 - alpha) * *s_ref;
+    *w_ref = new_w;
+    *s_ref = new_w;
 }
 
 /// `ranger_lookahead_lerp` の FP16 mirror 同時更新 variant (`--ft-fp16` の `ft_w` 専用)。

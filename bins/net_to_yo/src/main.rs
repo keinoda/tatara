@@ -37,6 +37,7 @@ struct DetectedInput {
 enum RoutingAssumption {
     KingRank9,
     Progress8KpAbs,
+    Progress8Ek,
 }
 
 #[derive(Parser)]
@@ -50,12 +51,25 @@ struct Args {
     output: PathBuf,
     /// 入力が`--bucket-mode kingrank9`で学習されたことを明示する。
     /// 量子化`.bin`はbucket routing modeを記録しない。
-    #[arg(long, conflicts_with = "assume_progress8kpabs")]
+    #[arg(
+        long,
+        conflicts_with_all = ["assume_progress8kpabs", "assume_progress8ek"]
+    )]
     assume_kingrank9: bool,
     /// 入力が`--bucket-mode progress8kpabs --num-buckets 8`で学習されたことを
     /// 明示する。変換時にbucket 7を未使用の第9slotへ複製する。
-    #[arg(long, conflicts_with = "assume_kingrank9")]
+    #[arg(
+        long,
+        conflicts_with_all = ["assume_kingrank9", "assume_progress8ek"]
+    )]
     assume_progress8kpabs: bool,
+    /// 入力が9-slotの`progress8ek`として学習されたことを明示する。
+    /// 既存slot 0..=7と相入玉専用slot 8をそのまま変換する。
+    #[arg(
+        long,
+        conflicts_with_all = ["assume_kingrank9", "assume_progress8kpabs"]
+    )]
+    assume_progress8ek: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -63,7 +77,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.input == args.output {
         return Err("input and output must be different paths".into());
     }
-    let routing = require_routing_assertion(args.assume_kingrank9, args.assume_progress8kpabs)?;
+    let routing = require_routing_assertion(
+        args.assume_kingrank9,
+        args.assume_progress8kpabs,
+        args.assume_progress8ek,
+    )?;
 
     let detect_input = File::open(&args.input)?;
     let detected = detect_arch(&mut BufReader::new(detect_input))?;
@@ -92,16 +110,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn require_routing_assertion(
     assume_kingrank9: bool,
     assume_progress8kpabs: bool,
+    assume_progress8ek: bool,
 ) -> io::Result<RoutingAssumption> {
-    match (assume_kingrank9, assume_progress8kpabs) {
-        (true, false) => Ok(RoutingAssumption::KingRank9),
-        (false, true) => Ok(RoutingAssumption::Progress8KpAbs),
-        (false, false) => invalid_input(
-            "tatara .bin files do not record bucket routing; pass exactly one of --assume-kingrank9 or --assume-progress8kpabs after confirming the training configuration",
+    match (assume_kingrank9, assume_progress8kpabs, assume_progress8ek) {
+        (true, false, false) => Ok(RoutingAssumption::KingRank9),
+        (false, true, false) => Ok(RoutingAssumption::Progress8KpAbs),
+        (false, false, true) => Ok(RoutingAssumption::Progress8Ek),
+        (false, false, false) => invalid_input(
+            "tatara .bin files do not record bucket routing; pass exactly one of --assume-kingrank9, --assume-progress8kpabs, or --assume-progress8ek after confirming the training configuration",
         ),
-        (true, true) => {
-            invalid_input("--assume-kingrank9 and --assume-progress8kpabs are mutually exclusive")
-        }
+        _ => invalid_input("routing assumption flags are mutually exclusive"),
     }
 }
 
@@ -109,6 +127,7 @@ fn validate_input_buckets(routing: RoutingAssumption, num_buckets: usize) -> io:
     let expected = match routing {
         RoutingAssumption::KingRank9 => YO_LAYER_STACKS,
         RoutingAssumption::Progress8KpAbs => PROGRESS_INPUT_BUCKETS,
+        RoutingAssumption::Progress8Ek => YO_LAYER_STACKS,
     };
     if num_buckets != expected {
         return invalid_input(format!(
@@ -126,6 +145,7 @@ fn prepare_yaneuraou_weights(
     match routing {
         RoutingAssumption::KingRank9 => Ok(weights),
         RoutingAssumption::Progress8KpAbs => pad_progress8_with_unused_ninth(weights, arch),
+        RoutingAssumption::Progress8Ek => Ok(weights),
     }
 }
 
@@ -494,21 +514,26 @@ mod tests {
 
     #[test]
     fn routing_mode_requires_exactly_one_explicit_assertion() {
-        let error = require_routing_assertion(false, false).unwrap_err();
+        let error = require_routing_assertion(false, false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("--assume-kingrank9"));
         assert!(error.to_string().contains("--assume-progress8kpabs"));
+        assert!(error.to_string().contains("--assume-progress8ek"));
 
         assert_eq!(
-            require_routing_assertion(true, false).unwrap(),
+            require_routing_assertion(true, false, false).unwrap(),
             RoutingAssumption::KingRank9
         );
         assert_eq!(
-            require_routing_assertion(false, true).unwrap(),
+            require_routing_assertion(false, true, false).unwrap(),
             RoutingAssumption::Progress8KpAbs
         );
+        assert_eq!(
+            require_routing_assertion(false, false, true).unwrap(),
+            RoutingAssumption::Progress8Ek
+        );
 
-        let error = require_routing_assertion(true, true).unwrap_err();
+        let error = require_routing_assertion(true, true, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("mutually exclusive"));
     }
@@ -533,11 +558,14 @@ mod tests {
     fn routing_assertion_requires_the_matching_input_bucket_count() {
         validate_input_buckets(RoutingAssumption::KingRank9, 9).unwrap();
         validate_input_buckets(RoutingAssumption::Progress8KpAbs, 8).unwrap();
+        validate_input_buckets(RoutingAssumption::Progress8Ek, 9).unwrap();
 
         let error = validate_input_buckets(RoutingAssumption::KingRank9, 8).unwrap_err();
         assert!(error.to_string().contains("requires 9 input buckets"));
         let error = validate_input_buckets(RoutingAssumption::Progress8KpAbs, 9).unwrap_err();
         assert!(error.to_string().contains("requires 8 input buckets"));
+        let error = validate_input_buckets(RoutingAssumption::Progress8Ek, 8).unwrap_err();
+        assert!(error.to_string().contains("requires 9 input buckets"));
     }
 
     fn assert_last_bucket_was_duplicated(before: &[f32], after: &[f32], per_bucket: usize) {
@@ -746,5 +774,20 @@ mod tests {
 
         let converted = convert(&bytes, &expect, RoutingAssumption::KingRank9);
         assert_eq!(converted, direct);
+    }
+
+    #[test]
+    fn progress8ek_full_pipeline_preserves_all_nine_input_slots() {
+        let expect = detected(FeatureSet::HalfKaHmMerged, 128, 16, 32);
+        let bytes = synthetic_bin(
+            expect.feature_set,
+            expect.ft_out,
+            expect.l1_out,
+            expect.l2_out,
+            YO_LAYER_STACKS,
+        );
+        let progress8ek = convert(&bytes, &expect, RoutingAssumption::Progress8Ek);
+        let direct = convert(&bytes, &expect, RoutingAssumption::KingRank9);
+        assert_eq!(progress8ek, direct);
     }
 }

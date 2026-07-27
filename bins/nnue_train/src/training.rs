@@ -28,7 +28,7 @@ use shogi_features::progress_kpabs::ShogiProgressKPAbs;
 #[cfg(feature = "gpu")]
 use shogi_features::{EffectBucketConfig, FtFactorizeMode, ThreatProfile};
 #[cfg(any(feature = "gpu", test))]
-use shogi_features::{FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS};
+use shogi_features::{FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS, PROGRESS8EK_NUM_BUCKETS};
 
 #[cfg(any(feature = "gpu", test))]
 use crate::cli::*;
@@ -164,6 +164,16 @@ pub(crate) fn validate_bucket_mode(
             }
             Ok(BucketMode::Progress8KpAbs)
         }
+        "progress8ek" => {
+            if args.num_buckets != PROGRESS8EK_NUM_BUCKETS {
+                return Err(format!(
+                    "--num-buckets must be {PROGRESS8EK_NUM_BUCKETS} when --bucket-mode progress8ek is used (got {})",
+                    args.num_buckets
+                )
+                .into());
+            }
+            Ok(BucketMode::Progress8Ek)
+        }
         "kingrank9" => {
             if args.num_buckets != KINGRANK9_NUM_BUCKETS {
                 return Err(format!(
@@ -180,7 +190,7 @@ pub(crate) fn validate_bucket_mode(
             Ok(BucketMode::KingRank9)
         }
         other => Err(format!(
-            "--bucket-mode '{other}' is unknown (expected 'progress8kpabs' or 'kingrank9')"
+            "--bucket-mode '{other}' is unknown (expected 'progress8kpabs', 'progress8ek', or 'kingrank9')"
         )
         .into()),
     }
@@ -191,12 +201,76 @@ pub(crate) fn validate_output_format(
     output_format: OutputFormatArg,
     bucket_mode: BucketMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if output_format == OutputFormatArg::Yaneuraou && !matches!(bucket_mode, BucketMode::KingRank9)
+    if output_format == OutputFormatArg::Yaneuraou
+        && !matches!(bucket_mode, BucketMode::KingRank9 | BucketMode::Progress8Ek)
     {
         return Err(
-            "--output-format yaneuraou requires LayerStack --bucket-mode kingrank9; progress8kpabs routing is not representable in YaneuraOu SFNN"
+            "--output-format yaneuraou requires LayerStack --bucket-mode kingrank9 or progress8ek; plain progress8kpabs routing is not representable without an explicit 8-to-9 slot conversion"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "gpu", test))]
+fn validate_progress8ek_finetune(
+    cli: &Cli,
+    layerstack: &LayerstackArgs,
+    bucket_mode: BucketMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !layerstack.progress8ek_finetune {
+        return Ok(());
+    }
+    if !matches!(bucket_mode, BucketMode::Progress8Ek) {
+        return Err("--progress8ek-finetune requires --bucket-mode progress8ek".into());
+    }
+    let Some(source_slot) = layerstack.progress8ek_source_slot else {
+        return Err("--progress8ek-finetune requires --progress8ek-source-slot".into());
+    };
+    if source_slot >= 8 {
+        return Err(format!("--progress8ek-source-slot must be in 0..8, got {source_slot}").into());
+    }
+    if cli.init_from.is_none() {
+        return Err(
+            "--progress8ek-finetune requires an 8-bucket quantised network via --init-from".into(),
+        );
+    }
+    if cli.resume.is_some() {
+        return Err("--progress8ek-finetune does not support --resume".into());
+    }
+    if layerstack.progress_coeff.is_none() {
+        return Err(
+            "--progress8ek-finetune requires --progress-coeff so the unchanged fixed8 routing is explicit"
+                .into(),
+        );
+    }
+    if layerstack.psqt
+        || layerstack.threat_profile != "off"
+        || layerstack.effect_bucket_config != "off"
+        || cli.threat_ablate.is_some()
+        || cli.threat_norm_dump
+    {
+        return Err(
+            "--progress8ek-finetune supports plain LayerStack only; PSQT, threat-profile, effect-bucket, threat-ablate, and threat-norm-dump are not supported"
+                .into(),
+        );
+    }
+    if cli.norm_loss {
+        return Err("--progress8ek-finetune does not support --norm-loss".into());
+    }
+    for (name, value) in [
+        ("--weight-decay", Some(cli.weight_decay)),
+        ("--ft-weight-decay", cli.ft_weight_decay),
+        ("--dense-weight-decay", cli.dense_weight_decay),
+        ("--bias-weight-decay", cli.bias_weight_decay),
+    ] {
+        if value.is_some_and(|value| value != 0.0) {
+            return Err(format!(
+                "--progress8ek-finetune requires zero weight decay, but {name} is {}",
+                value.expect("checked Some")
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -428,6 +502,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
 
     let bucket_mode = validate_bucket_mode(layerstack)?;
     validate_output_format(cli.output_format, bucket_mode)?;
+    validate_progress8ek_finetune(cli, layerstack, bucket_mode)?;
     // per-group override flags は wd / lr_mult とも (指定時) finite かつ >= 0。lr_mult=0
     // はその group の radam 更新を無効化する opt-in (clamp と norm loss apply は lr_mult
     // 非依存に掛かる)、bias wd=0 と同様に許容する。
@@ -490,9 +565,12 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
     }
     std::fs::create_dir_all(&cli.output)?;
 
-    // progress8kpabs のみ process-global coefficient を使う。KingRank9 は玉位置から
-    // 直接求めるため file I/O も progress model 初期化も行わない。
-    if matches!(bucket_mode, BucketMode::Progress8KpAbs) {
+    // progress8kpabs / progress8ek はprocess-global coefficientを使う。KingRank9は
+    // 玉位置から直接求めるためfile I/Oもprogress model初期化も行わない。
+    if matches!(
+        bucket_mode,
+        BucketMode::Progress8KpAbs | BucketMode::Progress8Ek
+    ) {
         match &layerstack.progress_coeff {
             Some(p) => {
                 println!("[train] loading progress8kpabs coeff: {}", p.display());
@@ -672,6 +750,12 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             e
         }
     })?;
+    if layerstack.progress8ek_finetune {
+        trainer.enable_progress8ek_finetune()?;
+        println!(
+            "[train] progress8ek fine-tune: shared FT/L1f and slots 0..=7 frozen; only slot 8 L1/L2/L3 will update"
+        );
+    }
     // resume / init-from の処理 → 開始 superbatch と (resume なら) 親 run id /
     // 保存済 LR horizon を決める。
     let (resumed_superbatch, resume_parent_id, resumed_lr_horizon): (
@@ -684,15 +768,27 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
             init.display()
         );
         let mut reader = std::io::BufReader::new(std::fs::File::open(init)?);
+        let source_buckets = if layerstack.progress8ek_finetune {
+            8
+        } else {
+            layerstack.num_buckets
+        };
         let mut weights = LayerStackWeights::load_quantised_with_psqt(
             &mut reader,
             feature_set,
             layerstack.ft_out,
             layerstack.l1,
             layerstack.l2,
-            layerstack.num_buckets,
+            source_buckets,
             layerstack.psqt,
         )?;
+        if layerstack.progress8ek_finetune {
+            weights = weights.append_progress8ek_slot_from(
+                layerstack
+                    .progress8ek_source_slot
+                    .expect("validated progress8ek source slot"),
+            )?;
+        }
         if let Some(spec) = cli.threat_ablate.as_deref() {
             let stats = crate::threat_ablate::apply(&mut weights, layerstack.ft_out, spec)
                 .map_err(std::io::Error::other)?;
@@ -2035,6 +2131,97 @@ pub(crate) fn run_simple_training(
 #[cfg(test)]
 mod shared_cli_tests {
     use super::*;
+
+    fn progress8ek_cli(global: &[&str], layer: &[&str]) -> Cli {
+        let mut argv = vec!["nnue-trainer"];
+        argv.extend_from_slice(global);
+        argv.push("layerstack");
+        argv.extend_from_slice(&[
+            "--bucket-mode",
+            "progress8ek",
+            "--num-buckets",
+            "9",
+            "--progress-coeff",
+            "progress.bin",
+            "--progress8ek-finetune",
+            "--progress8ek-source-slot",
+            "6",
+        ]);
+        argv.extend_from_slice(layer);
+        Cli::try_parse_from(argv).expect("progress8ek CLI parse")
+    }
+
+    fn progress8ek_validation(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+        let ArchCommand::LayerStack(layer) = &cli.arch else {
+            unreachable!()
+        };
+        let mode = validate_bucket_mode(layer)?;
+        validate_progress8ek_finetune(cli, layer, mode)
+    }
+
+    #[test]
+    fn progress8ek_finetune_requires_explicit_safe_contract() {
+        let valid = progress8ek_cli(&["--init-from", "base.bin", "--weight-decay", "0"], &[]);
+        progress8ek_validation(&valid).expect("safe progress8ek config");
+
+        let missing_init = progress8ek_cli(&["--weight-decay", "0"], &[]);
+        assert!(
+            progress8ek_validation(&missing_init)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an 8-bucket")
+        );
+
+        let missing_source = {
+            let argv = vec![
+                "nnue-trainer",
+                "--init-from",
+                "base.bin",
+                "--weight-decay",
+                "0",
+                "layerstack",
+                "--bucket-mode",
+                "progress8ek",
+                "--num-buckets",
+                "9",
+                "--progress-coeff",
+                "progress.bin",
+                "--progress8ek-finetune",
+            ];
+            Cli::try_parse_from(argv).expect("progress8ek CLI parse")
+        };
+        assert!(
+            progress8ek_validation(&missing_source)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --progress8ek-source-slot")
+        );
+
+        let decay = progress8ek_cli(&["--init-from", "base.bin", "--weight-decay", "0.01"], &[]);
+        assert!(
+            progress8ek_validation(&decay)
+                .unwrap_err()
+                .to_string()
+                .contains("requires zero weight decay")
+        );
+
+        let norm = progress8ek_cli(
+            &[
+                "--init-from",
+                "base.bin",
+                "--weight-decay",
+                "0",
+                "--norm-loss",
+            ],
+            &[],
+        );
+        assert!(
+            progress8ek_validation(&norm)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support --norm-loss")
+        );
+    }
 
     #[test]
     fn layerstack_fv_scale_follows_loss_and_override() {

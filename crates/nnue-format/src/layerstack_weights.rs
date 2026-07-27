@@ -561,6 +561,68 @@ impl LayerStackWeights {
         s
     }
 
+    /// 固定8分割の量子化weightへ、指定slotを複製した相入玉専用slot 8を追加する。
+    ///
+    /// FTとL1fは共有parameterなので変更しない。bucket別のL1/L2/L3だけを複製し、
+    /// 9-slotのprogress8ek初期weightを作る。暗黙の一般変換にしないため、入力は
+    /// 8 bucketかつPSQT無しに限定する。
+    pub fn append_progress8ek_slot_from(mut self, source_slot: usize) -> io::Result<Self> {
+        const SOURCE_BUCKETS: usize = 8;
+        if self.num_buckets != SOURCE_BUCKETS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "progress8ek initialization requires {SOURCE_BUCKETS} source buckets, got {}",
+                    self.num_buckets
+                ),
+            ));
+        }
+        if source_slot >= SOURCE_BUCKETS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "progress8ek source slot must be in 0..{SOURCE_BUCKETS}, got {source_slot}"
+                ),
+            ));
+        }
+        if self.psqt_w.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "progress8ek initialization does not support PSQT weights",
+            ));
+        }
+
+        fn append_slot(
+            values: &mut Vec<f32>,
+            buckets: usize,
+            source_slot: usize,
+            name: &str,
+        ) -> io::Result<()> {
+            if values.is_empty() || !values.len().is_multiple_of(buckets) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{name} length {} is not a non-zero multiple of {buckets}",
+                        values.len()
+                    ),
+                ));
+            }
+            let per_bucket = values.len() / buckets;
+            let start = source_slot * per_bucket;
+            values.extend_from_within(start..start + per_bucket);
+            Ok(())
+        }
+
+        append_slot(&mut self.l1_w, SOURCE_BUCKETS, source_slot, "l1_w")?;
+        append_slot(&mut self.l1_b, SOURCE_BUCKETS, source_slot, "l1_b")?;
+        append_slot(&mut self.l2_w, SOURCE_BUCKETS, source_slot, "l2_w")?;
+        append_slot(&mut self.l2_b, SOURCE_BUCKETS, source_slot, "l2_b")?;
+        append_slot(&mut self.l3_w, SOURCE_BUCKETS, source_slot, "l3_w")?;
+        append_slot(&mut self.l3_b, SOURCE_BUCKETS, source_slot, "l3_b")?;
+        self.num_buckets = SOURCE_BUCKETS + 1;
+        Ok(self)
+    }
+
     /// LayerStack quantised.bin を `writer` に書き出す。推論エンジン rshogi の
     /// `NetworkLayerStacks::read` で parse できる byte layout (`num_buckets` を
     /// header から読む対応が rshogi 側で要る)。`fv_scale = None` のときは arch
@@ -1601,6 +1663,74 @@ mod tests {
 
     use super::*;
     use shogi_features::FeatureSet;
+
+    #[test]
+    fn progress8ek_initialization_preserves_shared_and_duplicates_selected_slot() {
+        let mut source = LayerStackWeights::zeroed(FeatureSet::HalfKp.spec(), 128, 4, 8, 8);
+        for (index, values) in [
+            &mut source.l1_w,
+            &mut source.l1_b,
+            &mut source.l2_w,
+            &mut source.l2_b,
+            &mut source.l3_w,
+            &mut source.l3_b,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let per_bucket = values.len() / 8;
+            for bucket in 0..8 {
+                values[bucket * per_bucket..(bucket + 1) * per_bucket]
+                    .fill((index * 10 + bucket) as f32);
+            }
+        }
+        source.ft_w.fill(1.25);
+        source.ft_b.fill(-0.5);
+        source.l1f_w.fill(0.75);
+        source.l1f_b.fill(-0.25);
+        let before = source.clone();
+
+        let padded = source
+            .append_progress8ek_slot_from(6)
+            .expect("append slot 8");
+        assert_eq!(padded.num_buckets, 9);
+        assert_eq!(padded.ft_w, before.ft_w);
+        assert_eq!(padded.ft_b, before.ft_b);
+        assert_eq!(padded.l1f_w, before.l1f_w);
+        assert_eq!(padded.l1f_b, before.l1f_b);
+        for (old, new) in [
+            (&before.l1_w, &padded.l1_w),
+            (&before.l1_b, &padded.l1_b),
+            (&before.l2_w, &padded.l2_w),
+            (&before.l2_b, &padded.l2_b),
+            (&before.l3_w, &padded.l3_w),
+            (&before.l3_b, &padded.l3_b),
+        ] {
+            let per_bucket = old.len() / 8;
+            assert_eq!(&new[..old.len()], old.as_slice());
+            assert_eq!(&new[old.len()..], &old[6 * per_bucket..7 * per_bucket]);
+        }
+    }
+
+    #[test]
+    fn progress8ek_initialization_rejects_non_eight_bucket_source() {
+        let source = LayerStackWeights::zeroed(FeatureSet::HalfKp.spec(), 128, 4, 8, 9);
+        let error = source
+            .append_progress8ek_slot_from(6)
+            .expect_err("must reject");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("requires 8 source buckets"));
+    }
+
+    #[test]
+    fn progress8ek_initialization_rejects_invalid_source_slot() {
+        let source = LayerStackWeights::zeroed(FeatureSet::HalfKp.spec(), 128, 4, 8, 8);
+        let error = source
+            .append_progress8ek_slot_from(8)
+            .expect_err("must reject");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("source slot must be in 0..8"));
+    }
 
     #[test]
     fn count_i16_saturations_counts_only_out_of_range() {

@@ -1326,6 +1326,49 @@ extern "C" __global__ void radam_step(
     gradient[i] = 0.0F;
 }
 
+extern "C" __global__ void radam_step_range(
+    float* weights,
+    unsigned long long weights_len,
+    float* momentum,
+    unsigned long long momentum_len,
+    float* velocity,
+    unsigned long long velocity_len,
+    float* gradient,
+    unsigned long long gradient_len,
+    float learning_rate,
+    float step_size,
+    int use_variance_denom,
+    float decay,
+    float beta1,
+    float beta2,
+    float epsilon,
+    float min_weight,
+    float max_weight,
+    unsigned int offset,
+    unsigned int n
+) {
+    const unsigned int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= n) {
+        return;
+    }
+    const unsigned long long i = static_cast<unsigned long long>(offset) + local;
+    if (i >= weights_len || i >= momentum_len || i >= velocity_len || i >= gradient_len) {
+        return;
+    }
+    const float g = gradient[i];
+    const float rate = learning_rate * step_size;
+    float p = weights[i] * (1.0F - decay * rate);
+    const float m = beta1 * momentum[i] + (1.0F - beta1) * g;
+    const float v = beta2 * velocity[i] + (1.0F - beta2) * g * g;
+    momentum[i] = m;
+    velocity[i] = v;
+    const float value = use_variance_denom != 0 ? m / (sqrtf(v) + epsilon) : m;
+    p -= rate * value;
+    p = p < min_weight ? min_weight : (p > max_weight ? max_weight : p);
+    weights[i] = p;
+    gradient[i] = 0.0F;
+}
+
 extern "C" __global__ void crelu_fwd(
     const float* input,
     unsigned long long,
@@ -1853,6 +1896,28 @@ extern "C" __global__ void ranger_lookahead_lerp(
         weights[i] = value;
         slow_weights[i] = value;
     }
+}
+
+extern "C" __global__ void ranger_lookahead_lerp_range(
+    float* weights,
+    unsigned long long weights_len,
+    float* slow_weights,
+    unsigned long long slow_weights_len,
+    float alpha,
+    unsigned int offset,
+    unsigned int n
+) {
+    const unsigned int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= n) {
+        return;
+    }
+    const unsigned long long i = static_cast<unsigned long long>(offset) + local;
+    if (i >= weights_len || i >= slow_weights_len) {
+        return;
+    }
+    const float value = alpha * weights[i] + (1.0F - alpha) * slow_weights[i];
+    weights[i] = value;
+    slow_weights[i] = value;
 }
 
 extern "C" __global__ void count_buckets(

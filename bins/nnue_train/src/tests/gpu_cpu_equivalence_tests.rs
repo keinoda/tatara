@@ -6604,3 +6604,67 @@ fn layerstack_lookahead_and_beta1_follow_optimizer_kind() -> Result<(), Box<dyn 
     }
     Ok(())
 }
+
+/// progress8ek追加学習の1 stepで、共有parameterとslot 0..=7がbit単位で不変、
+/// slot 8だけが更新されることを実GPU trainerで確認する。
+#[test]
+fn progress8ek_finetune_updates_only_slot8() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::trainer_layerstack::{GpuTrainer, OptimGroupConfig};
+    use nnue_format::LayerStackWeights;
+    use nnue_train::init::LayerStackInit;
+    use shogi_features::FeatureSet;
+
+    let ctx = CudaContext::new(0)?;
+    let feature_set = FeatureSet::HalfKp.spec();
+    let mut trainer = GpuTrainer::new(
+        &ctx,
+        SMOKE_BATCH,
+        128,
+        DEFAULT_L1_OUT,
+        DEFAULT_L2_OUT,
+        9,
+        nnue_train::dataloader::BucketMode::Progress8Ek,
+        PrecisionFlags {
+            tf32: true,
+            ft_fp16: true,
+            ft_fp16_out: true,
+            fp16_opt_state: true,
+        },
+        feature_set,
+        OptimizerKind::Ranger,
+        OptimGroupConfig::resolve(0.0, None, None, None, None, None, None),
+        None,
+        None,
+        &LayerStackInit::default_uniform(),
+    )?;
+    trainer.enable_progress8ek_finetune()?;
+    let source = LayerStackWeights::zeroed(feature_set, 128, DEFAULT_L1_OUT, DEFAULT_L2_OUT, 8);
+    let initial = source.append_progress8ek_slot_from(6)?;
+    trainer.load_layerstack_weights(&initial)?;
+
+    let mut batch = BatchData::smoke_dummy(SMOKE_BATCH, feature_set);
+    batch.bucket_idx.fill(8);
+    batch.score.fill(200.0);
+    let before = trainer.to_layerstack_weights()?;
+    let loss = trainer.step(&batch.as_ref(), 1.0e-3, 0.0, SMOKE_LOSS_SIGMOID)?;
+    assert!(loss.is_finite());
+    let after = trainer.to_layerstack_weights()?;
+
+    assert_eq!(after.ft_w, before.ft_w);
+    assert_eq!(after.ft_b, before.ft_b);
+    assert_eq!(after.l1f_w, before.l1f_w);
+    assert_eq!(after.l1f_b, before.l1f_b);
+    for (old, new) in [
+        (&before.l1_w, &after.l1_w),
+        (&before.l1_b, &after.l1_b),
+        (&before.l2_w, &after.l2_w),
+        (&before.l2_b, &after.l2_b),
+        (&before.l3_w, &after.l3_w),
+        (&before.l3_b, &after.l3_b),
+    ] {
+        let per_bucket = old.len() / 9;
+        assert_eq!(&new[..8 * per_bucket], &old[..8 * per_bucket]);
+    }
+    assert_ne!(after.l3_b[8], before.l3_b[8]);
+    Ok(())
+}

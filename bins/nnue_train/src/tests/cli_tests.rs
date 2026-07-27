@@ -222,12 +222,21 @@ fn yaneuraou_output_format_parses_and_simple_rejects_it() {
         nnue_train::dataloader::BucketMode::KingRank9,
     )
     .expect("KingRank9 should support YaneuraOu output");
+    validate_output_format(
+        OutputFormatArg::Yaneuraou,
+        nnue_train::dataloader::BucketMode::Progress8Ek,
+    )
+    .expect("progress8ek should support YaneuraOu output");
     let error = validate_output_format(
         OutputFormatArg::Yaneuraou,
         nnue_train::dataloader::BucketMode::Progress8KpAbs,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("--bucket-mode kingrank9"));
+    assert!(
+        error
+            .to_string()
+            .contains("--bucket-mode kingrank9 or progress8ek")
+    );
 }
 
 fn layerstack_args(argv: &[&str]) -> LayerstackArgs {
@@ -265,10 +274,23 @@ fn kingrank9_bucket_mode_validation() {
         .to_string();
     assert!(err.contains("not used"), "{err}");
 
+    let progress8ek = layerstack_args(&["--bucket-mode", "progress8ek", "--num-buckets", "9"]);
+    assert!(matches!(
+        validate_bucket_mode(&progress8ek).expect("progress8ek mode"),
+        nnue_train::dataloader::BucketMode::Progress8Ek
+    ));
+    let wrong_progress8ek =
+        layerstack_args(&["--bucket-mode", "progress8ek", "--num-buckets", "8"]);
+    let err = validate_bucket_mode(&wrong_progress8ek)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("must be 9"), "{err}");
+
     let unknown = layerstack_args(&["--bucket-mode", "unknown"]);
     let err = validate_bucket_mode(&unknown).unwrap_err().to_string();
     assert!(err.contains("unknown"), "{err}");
     assert!(err.contains("progress8kpabs"), "{err}");
+    assert!(err.contains("progress8ek"), "{err}");
     assert!(err.contains("kingrank9"), "{err}");
 }
 

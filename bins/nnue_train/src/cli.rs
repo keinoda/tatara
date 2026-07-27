@@ -764,7 +764,7 @@ pub(crate) struct LayerstackArgs {
     #[arg(long, allow_hyphen_values = true, value_parser = parse_positive_i32)]
     pub(crate) fv_scale: Option<i32>,
 
-    /// progress8kpabs coefficient file (`progress.bin`; f64 LE x 125388 = 81
+    /// progress8kpabs / progress8ek coefficient file (`progress.bin`; f64 LE x 125388 = 81
     /// king squares x 1548 KP-abs piece inputs). When omitted in progress8kpabs
     /// mode, every position falls in bucket 4 (zero weights → `sigmoid(0) =
     /// 0.5`). Do not specify this option in kingrank9 mode.
@@ -772,9 +772,23 @@ pub(crate) struct LayerstackArgs {
     pub(crate) progress_coeff: Option<PathBuf>,
 
     /// Bucket assignment: `progress8kpabs` uses the KP-absolute progress model;
+    /// `progress8ek` routes mutual entering-king positions to slot 8 and all
+    /// other positions through the existing fixed8 progress routing;
     /// `kingrank9` uses YaneuraOu KingRank9 and requires exactly 9 buckets.
     #[arg(long, default_value = "progress8kpabs")]
     pub(crate) bucket_mode: String,
+
+    /// Initialise a 9-slot progress8ek network from an 8-bucket quantised
+    /// `--init-from` network and train only slot 8's L1/L2/L3 parameters.
+    /// Shared FT/L1f and slots 0..=7 are excluded from optimizer updates, and
+    /// a training batch containing any non-slot-8 position is rejected.
+    #[arg(long)]
+    pub(crate) progress8ek_finetune: bool,
+
+    /// Source slot copied into slot 8 before progress8ek fine-tuning.
+    /// Specify an existing fixed8 slot in the range 0..=7.
+    #[arg(long, requires = "progress8ek_finetune")]
+    pub(crate) progress8ek_source_slot: Option<usize>,
 
     /// Output dimension of the FT (feature transformer) per perspective. Must be
     /// a positive multiple of 128. The default value keeps the network

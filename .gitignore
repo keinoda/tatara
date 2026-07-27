@@ -37,6 +37,7 @@
 /runs
 /survey
 /gates
+/extractions
 /monitor
 
 # cuda-oxide が生成する NVPTX IR / PTX / cubin (kernel module 単位で

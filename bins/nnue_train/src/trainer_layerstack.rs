@@ -8,7 +8,7 @@ use nnue_train::dataloader::BucketMode;
 use nnue_train::init::{self, LayerStackInit, WeightShape};
 use nnue_train::optimizer::OptimizerKind;
 use nnue_train::trainer::LossKind;
-use shogi_features::FeatureSetSpec;
+use shogi_features::{FeatureSetSpec, PROGRESS8EK_ENTERING_KING_SLOT};
 
 use crate::ft_factorize_host::{self, FoldComb};
 use crate::*;
@@ -261,6 +261,8 @@ pub(crate) struct GpuTrainer {
     /// 起動時に決まり、以降不変。
     num_buckets: usize,
     bucket_mode: BucketMode,
+    /// progress8ek追加学習時、共有部とslot 0..=7をoptimizer対象から外す。
+    progress8ek_finetune: bool,
     optimizer: OptimizerKind,
     step_count: u64,
 }
@@ -731,6 +733,21 @@ fn uniform_optim_group_layout(psqt_enabled: bool) -> Vec<(&'static str, OptimGro
     groups
 }
 
+/// progress8ek追加学習で更新するslot 8の範囲を返す。共有groupとPSQTは`None`。
+fn progress8ek_optimizer_span(
+    label: &str,
+    total: usize,
+    num_buckets: usize,
+) -> Option<(usize, usize)> {
+    if !matches!(label, "l1_w" | "l1_b" | "l2_w" | "l2_b" | "l3_w" | "l3_b") {
+        return None;
+    }
+    debug_assert_eq!(num_buckets, 9);
+    debug_assert!(total.is_multiple_of(num_buckets));
+    let per_bucket = total / num_buckets;
+    Some((8 * per_bucket, per_bucket))
+}
+
 impl GpuTrainer {
     /// CUDA context を作成し、kernel module を load、10 weight groups + optimizer state +
     /// 中間 activation workspace (`batch_size` 分) を確保。
@@ -1010,6 +1027,7 @@ impl GpuTrainer {
             norm_scratch: DeviceBuffer::<f32>::zeroed(&stream, norm_scratch_len)?,
             num_buckets,
             bucket_mode,
+            progress8ek_finetune: false,
             optimizer,
             step_count: 0,
         };
@@ -1019,6 +1037,25 @@ impl GpuTrainer {
         // --resume) は load 後に caller が再同期する。
         trainer.sync_ft_forward_weights()?;
         Ok(trainer)
+    }
+
+    /// 8→9初期化後にslot 8だけを更新するprogress8ek追加学習を有効にする。
+    /// CLI validationに加え、trainer単体利用でも危険な構成をfail-closedにする。
+    pub(crate) fn enable_progress8ek_finetune(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !matches!(self.bucket_mode, BucketMode::Progress8Ek) || self.num_buckets != 9 {
+            return Err(invalid_data(
+                "progress8ek fine-tune requires BucketMode::Progress8Ek with 9 buckets".to_string(),
+            ));
+        }
+        if self.feature_set.ft_factorize() || self.psqt.is_some() || self.norm_loss_factor.is_some()
+        {
+            return Err(invalid_data(
+                "progress8ek fine-tune requires plain LayerStack without FT factorizer, PSQT, or norm loss"
+                    .to_string(),
+            ));
+        }
+        self.progress8ek_finetune = true;
+        Ok(())
     }
 
     /// `LayerStackWeights` から weight buffer を device に upload (pretrained 注入、`--init-from`)。
@@ -1637,6 +1674,22 @@ impl GpuTrainer {
         wdl_lambda: f32,
         loss: LossKind,
     ) -> Result<f64, Box<dyn std::error::Error>> {
+        if self.progress8ek_finetune
+            && batch
+                .bucket_idx
+                .iter()
+                .any(|&bucket| bucket != i32::from(PROGRESS8EK_ENTERING_KING_SLOT))
+        {
+            let first = batch
+                .bucket_idx
+                .iter()
+                .position(|&bucket| bucket != i32::from(PROGRESS8EK_ENTERING_KING_SLOT))
+                .expect("any found a non-slot-8 bucket");
+            return Err(invalid_data(format!(
+                "progress8ek fine-tune accepts only entering-king slot 8, but batch position {first} routed to slot {}",
+                batch.bucket_idx[first]
+            )));
+        }
         // 環境変数 `NNUE_TRAIN_STEP_PROFILE` がセットされていれば各 phase の境界で
         // `synchronize()` + 経過時間を stderr に出す (粗い h2d / forward / backward /
         // optimizer / teardown breakdown 用)。未設定なら追加の sync ゼロ。
@@ -3777,68 +3830,70 @@ impl GpuTrainer {
         // のみ更新し step 末の fold が comb を再生成する (`launch_ft_fold`)。
         let ft_factorize = self.feature_set.ft_factorize();
         let (ft_wd, ft_lr) = optim_groups.effective(OptimGroupKind::Ft, lr);
-        match (&mut self.ft_w_m, &mut self.ft_w_v) {
-            (MomentBuf::F16(ft_w_m), MomentBuf::F16(ft_w_v)) => {
-                let (mut ft_w_m, mut ft_w_v) = (ft_w_m, ft_w_v);
-                if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
-                    unsafe {
-                        // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
-                        // stream の完了を待つ同期点まで生存する device allocation。
-                        cuda_launch! {
-                            kernel: radam_step_f16state_mirror,
-                            stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                            args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
-                                   slice_mut(self.ft_w_grad), slice_mut(ft_w_h), ft_lr, step_size, denom,
-                                   ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
-                                   FT_OPT_M_SCALE, FT_OPT_V_SCALE, ft_w_n as u32]
-                        }
-                    }?;
-                } else {
-                    unsafe {
-                        // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
-                        // stream の完了を待つ同期点まで生存する device allocation。
-                        cuda_launch! {
-                            kernel: radam_step_f16state,
-                            stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                            args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
-                                   slice_mut(self.ft_w_grad), ft_lr, step_size, denom,
-                                   ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
-                                   FT_OPT_M_SCALE, FT_OPT_V_SCALE, ft_w_n as u32]
-                        }
-                    }?;
+        if !self.progress8ek_finetune {
+            match (&mut self.ft_w_m, &mut self.ft_w_v) {
+                (MomentBuf::F16(ft_w_m), MomentBuf::F16(ft_w_v)) => {
+                    let (mut ft_w_m, mut ft_w_v) = (ft_w_m, ft_w_v);
+                    if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
+                        unsafe {
+                            // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
+                            // stream の完了を待つ同期点まで生存する device allocation。
+                            cuda_launch! {
+                                kernel: radam_step_f16state_mirror,
+                                stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
+                                args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
+                                       slice_mut(self.ft_w_grad), slice_mut(ft_w_h), ft_lr, step_size, denom,
+                                       ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
+                                       FT_OPT_M_SCALE, FT_OPT_V_SCALE, ft_w_n as u32]
+                            }
+                        }?;
+                    } else {
+                        unsafe {
+                            // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
+                            // stream の完了を待つ同期点まで生存する device allocation。
+                            cuda_launch! {
+                                kernel: radam_step_f16state,
+                                stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
+                                args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
+                                       slice_mut(self.ft_w_grad), ft_lr, step_size, denom,
+                                       ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX,
+                                       FT_OPT_M_SCALE, FT_OPT_V_SCALE, ft_w_n as u32]
+                            }
+                        }?;
+                    }
                 }
-            }
-            (MomentBuf::F32(ft_w_m), MomentBuf::F32(ft_w_v)) => {
-                let (mut ft_w_m, mut ft_w_v) = (ft_w_m, ft_w_v);
-                if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
-                    unsafe {
-                        // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
-                        // stream の完了を待つ同期点まで生存する device allocation。
-                        cuda_launch! {
-                            kernel: radam_step_fp16_mirror,
-                            stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                            args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
-                                   slice_mut(self.ft_w_grad), slice_mut(ft_w_h), ft_lr, step_size, denom,
-                                   ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
-                        }
-                    }?;
-                } else {
-                    unsafe {
-                        // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
-                        // stream の完了を待つ同期点まで生存する device allocation。
-                        cuda_launch! {
-                            kernel: radam_step,
-                            stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                            args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
-                                   slice_mut(self.ft_w_grad), ft_lr, step_size, denom, ft_wd, beta1, BETA2,
-                                   EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
-                        }
-                    }?;
+                (MomentBuf::F32(ft_w_m), MomentBuf::F32(ft_w_v)) => {
+                    let (mut ft_w_m, mut ft_w_v) = (ft_w_m, ft_w_v);
+                    if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
+                        unsafe {
+                            // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
+                            // stream の完了を待つ同期点まで生存する device allocation。
+                            cuda_launch! {
+                                kernel: radam_step_fp16_mirror,
+                                stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
+                                args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
+                                       slice_mut(self.ft_w_grad), slice_mut(ft_w_h), ft_lr, step_size, denom,
+                                       ft_wd, beta1, BETA2, EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
+                            }
+                        }?;
+                    } else {
+                        unsafe {
+                            // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
+                            // stream の完了を待つ同期点まで生存する device allocation。
+                            cuda_launch! {
+                                kernel: radam_step,
+                                stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
+                                args: [slice_mut(self.ft_w), slice_mut(ft_w_m), slice_mut(ft_w_v),
+                                       slice_mut(self.ft_w_grad), ft_lr, step_size, denom, ft_wd, beta1, BETA2,
+                                       EPS, W_CLAMP_NONE_MIN, W_CLAMP_NONE_MAX, ft_w_n as u32]
+                            }
+                        }?;
+                    }
                 }
+                // m / v は同じ flag で `MomentBuf::zeroed` され、load/init でも同期するので
+                // 精度が食い違うことはない。
+                _ => unreachable!("ft_w m and v moment buffers always share precision"),
             }
-            // m / v は同じ flag で `MomentBuf::zeroed` され、load/init でも同期するので
-            // 精度が食い違うことはない。
-            _ => unreachable!("ft_w m and v moment buffers always share precision"),
         }
         // 一様 (非 FT) weight group を 1 配列に集約し、radam pass / lerp pass をそれぞれ
         // loop 1 本に畳む。各 group は buffer と要素数・clamp だけが異なり、scalar
@@ -3988,6 +4043,25 @@ impl GpuTrainer {
             // を resolve する。全 group 既定 (override 無し) なら decay = 大域値・
             // lr = scheduled_lr で単一 weight_decay 経路と bit-identical。
             let (wd, lr_g) = optim_groups.effective(g.kind, lr);
+            if self.progress8ek_finetune {
+                let Some((offset, n)) = progress8ek_optimizer_span(g.label, g.n, self.num_buckets)
+                else {
+                    continue;
+                };
+                unsafe {
+                    // SAFETY: range kernelはfull allocationと検証済みoffset/nを受け、
+                    // slot 8の範囲外を読み書きしない。
+                    cuda_launch! {
+                        kernel: radam_step_range,
+                        stream: self.stream, module: self.module, config: cfg_1d(n),
+                        args: [slice_mut(*g.weight), slice_mut(*g.m), slice_mut(*g.v),
+                               slice_mut(*g.grad), lr_g, step_size, denom, wd,
+                               beta1, BETA2, EPS, g.clamp_min, g.clamp_max,
+                               offset as u32, n as u32]
+                    }
+                }?;
+                continue;
+            }
             unsafe {
                 // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
                 // stream の完了を待つ同期点まで生存する device allocation。
@@ -4006,30 +4080,49 @@ impl GpuTrainer {
         // variant を使い、forward 用 `ft_w_h` を lerp 後の最終値で同期し直す (factorizer
         // 有効時は radam と同じ理由で mirror variant を使わず、step 末の fold に委ねる)。
         if self.optimizer.uses_lookahead() && self.step_count.is_multiple_of(RANGER_K) {
-            if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
-                unsafe {
-                    // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
-                    // stream の完了を待つ同期点まで生存する device allocation。
-                    cuda_launch! {
-                        kernel: ranger_lookahead_lerp_fp16_mirror,
-                        stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                        args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), slice_mut(ft_w_h),
-                               RANGER_ALPHA, ft_w_n as u32]
-                    }
-                }?;
-            } else {
-                unsafe {
-                    // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
-                    // stream の完了を待つ同期点まで生存する device allocation。
-                    cuda_launch! {
-                        kernel: ranger_lookahead_lerp,
-                        stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
-                        args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), RANGER_ALPHA, ft_w_n as u32]
-                    }
-                }?;
+            if !self.progress8ek_finetune {
+                if let Some(mut ft_w_h) = self.ft_w_h.as_mut().filter(|_| !ft_factorize) {
+                    unsafe {
+                        // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
+                        // stream の完了を待つ同期点まで生存する device allocation。
+                        cuda_launch! {
+                            kernel: ranger_lookahead_lerp_fp16_mirror,
+                            stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
+                            args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), slice_mut(ft_w_h),
+                                   RANGER_ALPHA, ft_w_n as u32]
+                        }
+                    }?;
+                } else {
+                    unsafe {
+                        // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
+                        // stream の完了を待つ同期点まで生存する device allocation。
+                        cuda_launch! {
+                            kernel: ranger_lookahead_lerp,
+                            stream: self.stream, module: self.module, config: cfg_1d(ft_w_n),
+                            args: [slice_mut(self.ft_w), slice_mut(self.ft_w_slow), RANGER_ALPHA, ft_w_n as u32]
+                        }
+                    }?;
+                }
             }
             // 一様 group の lerp も radam と同じ group 集合を回す (FT は上で個別に launch)。
             for g in uniform_groups.iter_mut().chain(psqt_group.iter_mut()) {
+                if self.progress8ek_finetune {
+                    let Some((offset, n)) =
+                        progress8ek_optimizer_span(g.label, g.n, self.num_buckets)
+                    else {
+                        continue;
+                    };
+                    unsafe {
+                        // SAFETY: range kernelはslot 8の検証済み範囲だけを更新する。
+                        cuda_launch! {
+                            kernel: ranger_lookahead_lerp_range,
+                            stream: self.stream, module: self.module, config: cfg_1d(n),
+                            args: [slice_mut(*g.weight), slice_mut(*g.slow), RANGER_ALPHA,
+                                   offset as u32, n as u32]
+                        }
+                    }?;
+                    continue;
+                }
                 unsafe {
                     // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
                     // stream の完了を待つ同期点まで生存する device allocation。
@@ -4115,6 +4208,20 @@ mod tests {
         let mut expected_psqt = expected_no_psqt.clone();
         expected_psqt.push(("psqt_w", Ft, none.0, none.1));
         assert_eq!(uniform_optim_group_layout(true), expected_psqt);
+    }
+
+    #[test]
+    fn progress8ek_optimizer_spans_only_slot8_of_bucketed_groups() {
+        for label in ["ft_b", "l1f_w", "l1f_b", "psqt_w"] {
+            assert_eq!(progress8ek_optimizer_span(label, 144, 9), None, "{label}");
+        }
+        for label in ["l1_w", "l1_b", "l2_w", "l2_b", "l3_w", "l3_b"] {
+            assert_eq!(
+                progress8ek_optimizer_span(label, 144, 9),
+                Some((128, 16)),
+                "{label}"
+            );
+        }
     }
 
     /// per-group flag を一つも指定しない (`None`) と、3 group とも weight_decay = 大域値・

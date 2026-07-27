@@ -28,7 +28,10 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
-use shogi_features::{FeatureSetSpec, kingrank9_bucket_board};
+use shogi_features::{
+    FeatureSetSpec, PROGRESS8EK_ENTERING_KING_SLOT, PROGRESS8EK_PROGRESS_BUCKETS,
+    is_mutual_entering_king, kingrank9_bucket_board,
+};
 use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, ShogiBoard};
 
 /// PSV record size in bytes (`shogi_format::PackedSfenValue` is a fixed
@@ -79,6 +82,8 @@ pub enum BucketMode {
     /// KP-absolute progress 推定値を `num_buckets` 等分する。
     #[default]
     Progress8KpAbs,
+    /// 相入玉をslot 8、それ以外を既存の固定8 progress bucketへ送る。
+    Progress8Ek,
     /// 双方の玉段を手番視点に正規化した固定 9 bucket を使う。
     KingRank9,
 }
@@ -88,6 +93,7 @@ impl BucketMode {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::Progress8KpAbs => "progress8kpabs",
+            Self::Progress8Ek => "progress8ek",
             Self::KingRank9 => "kingrank9",
         }
     }
@@ -97,6 +103,14 @@ impl BucketMode {
     pub fn bucket_board(self, board: &ShogiBoard, num_buckets: usize) -> u8 {
         match self {
             Self::Progress8KpAbs => ShogiProgressKPAbs.bucket_board(board, num_buckets),
+            Self::Progress8Ek => {
+                debug_assert_eq!(num_buckets, 9);
+                if is_mutual_entering_king(board) {
+                    PROGRESS8EK_ENTERING_KING_SLOT
+                } else {
+                    ShogiProgressKPAbs.bucket_board(board, PROGRESS8EK_PROGRESS_BUCKETS)
+                }
+            }
             Self::KingRank9 => kingrank9_bucket_board(board),
         }
     }
@@ -971,11 +985,33 @@ impl Drop for BucketedPrefetchedLoader {
 mod tests {
     use super::*;
     use shogi_features::FeatureSet;
+    use shogi_format::types::Square;
     use std::path::PathBuf;
 
     /// テストで使う feature set spec (現 production の halfka-hm-merged)。
     fn test_spec() -> FeatureSetSpec {
         FeatureSet::HalfKaHmMerged.spec()
+    }
+
+    #[test]
+    fn progress8ek_uses_slot8_only_for_mutual_entering_king() {
+        let entering = ShogiBoard {
+            black_king_sq: Square::new(4, 4),
+            white_king_sq: Square::new(4, 4),
+            ..Default::default()
+        };
+        assert_eq!(BucketMode::Progress8Ek.bucket_board(&entering, 9), 8);
+
+        let ordinary = ShogiBoard {
+            black_king_sq: Square::new(4, 5),
+            white_king_sq: Square::new(4, 4),
+            ..Default::default()
+        };
+        assert_eq!(
+            BucketMode::Progress8Ek.bucket_board(&ordinary, 9),
+            BucketMode::Progress8KpAbs.bucket_board(&ordinary, 8),
+            "non-entering path must remain identical to fixed8 progress routing"
+        );
     }
 
     /// shogi-format crate test fixture (100 records × 40 bytes = 4000 bytes)。
