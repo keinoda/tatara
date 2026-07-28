@@ -7,6 +7,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 require_legacy_training_complete
 require_clean_source
 require_single_rtx5090
+cd "$PROGRESS8EK_ROOT"
 readonly COMMIT="$(git -C "$PROGRESS8EK_ROOT" rev-parse HEAD)"
 readonly GATE_DIR="$GATES_ROOT/cuda-$COMMIT"
 [[ ! -e "$GATE_DIR" ]] || fail "既存CUDA gateを上書きしません: $GATE_DIR"
