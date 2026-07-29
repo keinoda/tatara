@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use nnue_format::layerstack_weights::{LEGACY_NNUE_VERSION_BUCKETS9, NNUE_VERSION};
-use nnue_format::{LayerStackWeights, YANEURAOU_LAYER_STACKS, save_yaneuraou};
+use nnue_format::{
+    I8QuantisationStats, LayerStackWeights, YANEURAOU_LAYER_STACKS, save_yaneuraou,
+    yaneuraou_i8_saturation_report,
+};
 use shogi_features::FeatureSet;
 
 /// YaneuraOu SFNN が格納する LayerStack 数。routing 規則は binary に含まれない。
@@ -81,12 +84,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     reject_trailing_data(&mut reader, detected.num_buckets)?;
     let weights = prepare_yaneuraou_weights(weights, &detected.arch, routing)?;
+    let saturation = yaneuraou_i8_saturation_report(&weights)?;
 
     let output = File::create(&args.output)?;
     let mut writer = BufWriter::new(output);
     save_yaneuraou(&mut writer, &weights)?;
     writer.flush()?;
+    print_saturation("l1", saturation.l1);
+    print_saturation("l2", saturation.l2);
+    print_saturation("l3", saturation.l3);
     Ok(())
+}
+
+fn print_saturation(layer: &str, stats: I8QuantisationStats) {
+    eprintln!(
+        "[net_to_yo] i8_saturation layer={layer} total={} pinned_pm127={} \
+         pinned_pm127_percent={:.6} negative_128={} saturated_abs_ge127={} \
+         saturated_abs_ge127_percent={:.6}",
+        stats.total,
+        stats.pinned_pm127(),
+        stats.pinned_pm127_percent(),
+        stats.negative_128,
+        stats.saturated_abs_ge127(),
+        stats.saturated_abs_ge127_percent(),
+    );
 }
 
 fn require_routing_assertion(
