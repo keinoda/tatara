@@ -249,7 +249,9 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::top_bucket;
+    use clap::Parser;
+
+    use super::{Args, top_bucket};
 
     #[test]
     fn top_bucket_picks_the_largest_with_share() {
@@ -267,5 +269,30 @@ mod tests {
     fn top_bucket_ties_keep_the_first() {
         let (idx, _) = top_bucket(&[50, 50, 0]);
         assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn prune_options_are_parsed_with_training_band_syntax() {
+        let args = Args::try_parse_from([
+            "progress-bucket-survey",
+            "--data",
+            "teacher.psv",
+            "--progress",
+            "progress.bin",
+            "--prune-bands",
+            "1500:1.0,3000:0.3,inf:0.1",
+            "--prune-seed",
+            "42",
+            "--prune-epoch",
+            "3",
+        ])
+        .expect("valid prune options");
+
+        assert_eq!(
+            args.prune_bands.expect("prune bands").to_string(),
+            "1500:1,3000:0.3,inf:0.1"
+        );
+        assert_eq!(args.prune_seed, 42);
+        assert_eq!(args.prune_epoch, 3);
     }
 }
