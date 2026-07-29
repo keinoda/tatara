@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+use nnue_train::dataloader::{PruneBands, PruneConfig};
 use shogi_features::ShogiProgressKPAbs;
 use shogi_format::PackedSfenValue;
 
@@ -57,6 +58,24 @@ struct Args {
     /// default. Position `p` maps to bucket `min(N-1, floor(p * N))`.
     #[arg(long, default_value_t = 9)]
     num_buckets: usize,
+
+    /// 評価値依存の保持帯。学習時の間引き後分布を再現する。
+    #[arg(long)]
+    prune_bands: Option<PruneBands>,
+
+    /// 間引き判定へ渡すseed。
+    #[arg(long, default_value_t = 0)]
+    prune_seed: u64,
+
+    /// 間引き判定へ渡すepoch。
+    #[arg(long, default_value_t = 0)]
+    prune_epoch: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SampledRecord {
+    global_index: u64,
+    psv: PackedSfenValue,
 }
 
 /// 1 PSV ファイルから最大 `max` 局面をサンプリングする。`offset` レコード目から
@@ -64,10 +83,11 @@ struct Args {
 /// そこで打ち切る (末尾の半端バイトは無視)。EOF 以外の I/O エラーは伝播する。
 fn read_samples(
     path: &PathBuf,
+    global_start: u64,
     offset: u64,
     stride: u64,
     max: usize,
-) -> io::Result<Vec<PackedSfenValue>> {
+) -> io::Result<Vec<SampledRecord>> {
     let record = size_of::<PackedSfenValue>() as u64;
     let mut file = File::open(path)?;
     let total_records = file.metadata()?.len() / record;
@@ -76,6 +96,7 @@ fn read_samples(
         return Ok(out);
     }
 
+    let mut local_index = offset;
     file.seek(SeekFrom::Start(offset * record))?;
     while out.len() < max {
         let mut psv = PackedSfenValue::default();
@@ -86,7 +107,11 @@ fn read_samples(
             // EOF 以外の I/O エラーは呼び出し元へ伝播する。
             Err(e) => return Err(e),
         }
-        out.push(psv);
+        out.push(SampledRecord {
+            global_index: global_start + local_index,
+            psv,
+        });
+        local_index = local_index.saturating_add(stride);
         if stride > 1 {
             // `(stride-1) * record` バイト先へ進める。極端な --stride でも u64
             // overflow しないよう saturating で計算し、SeekFrom::Current の i64
@@ -136,6 +161,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if !(1..=9).contains(&args.num_buckets) {
         return Err(format!("--num-buckets must be in [1, 9] (got {})", args.num_buckets).into());
     }
+    if args.prune_bands.is_none() && (args.prune_seed != 0 || args.prune_epoch != 0) {
+        return Err("--prune-seed/--prune-epoch require --prune-bands".into());
+    }
     let data_paths: Vec<PathBuf> = args
         .data
         .split(',')
@@ -150,36 +178,57 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // progress.bin をロード。`ShogiProgressKPAbs` は重みをプロセス global に
     // 持つため 1 プロセス 1 model (epoch 比較は本ツールを複数回実行する)。
     let kpabs = ShogiProgressKPAbs::load_from_bin(&args.progress)?;
+    let prune = args
+        .prune_bands
+        .map(|bands| PruneConfig::new(bands, 0.0, args.prune_seed))
+        .transpose()?;
 
     let n_buckets = args.num_buckets;
     let mut total_hist = vec![0u64; n_buckets];
     let mut grand_total = 0usize;
     let mut remaining = args.samples;
+    let mut global_start = 0u64;
+    let record = size_of::<PackedSfenValue>() as u64;
 
     for path in &data_paths {
         if remaining == 0 {
             break;
         }
-        let samples = read_samples(path, args.offset, args.stride, remaining)?;
+        let file_records = std::fs::metadata(path)?.len() / record;
+        let samples = read_samples(path, global_start, args.offset, args.stride, remaining)?;
         remaining -= samples.len();
-        grand_total += samples.len();
+        global_start += file_records;
 
         let mut pack_hist = vec![0u64; n_buckets];
-        for psv in &samples {
-            pack_hist[kpabs.bucket(psv, n_buckets) as usize] += 1;
+        let mut retained = 0usize;
+        for sample in &samples {
+            if prune.as_ref().is_some_and(|config| {
+                !config
+                    .sample(sample.psv.score(), sample.global_index, args.prune_epoch)
+                    .0
+            }) {
+                continue;
+            }
+            pack_hist[kpabs.bucket(&sample.psv, n_buckets) as usize] += 1;
+            retained += 1;
         }
+        grand_total += retained;
         for (b, &count) in pack_hist.iter().enumerate() {
             total_hist[b] += count;
         }
 
-        println!("loaded {} positions from {}", samples.len(), path.display());
+        println!(
+            "loaded {retained} retained positions from {} ({} sampled)",
+            path.display(),
+            samples.len()
+        );
         if args.per_pack {
             print_hist(&format!("per-pack: {}", path.display()), &pack_hist);
         }
     }
 
     if grand_total == 0 {
-        return Err("no positions read from --data files".into());
+        return Err("no positions retained from --data files".into());
     }
     print_hist(
         &format!("progress-kpabs bucket distribution (total, N={n_buckets})"),

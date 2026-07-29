@@ -116,17 +116,111 @@ pub fn loss_wrm_cpu(
     extended: bool,
     n: usize,
 ) {
+    loss_wrm_cpu_impl(
+        out,
+        score,
+        wdl,
+        per_pos_norm,
+        None,
+        dl_dout,
+        loss_acc,
+        lambda,
+        nnue2score,
+        in_scaling,
+        in_offset,
+        target_offset,
+        target_scaling,
+        pow_exp,
+        qp_asymmetry,
+        weight_boost_w1,
+        weight_boost_w2,
+        extended,
+        n,
+    );
+}
+
+/// [`loss_wrm_cpu`]と同じ計算をpositionごとのimportance重み付きで行う。
+/// 呼出側は`extended = true`を指定し、lossと勾配を合成後の重み総和で正規化する。
+#[allow(clippy::too_many_arguments)]
+pub fn loss_wrm_cpu_with_importance(
+    out: &[f32],
+    score: &[f32],
+    wdl: &[f32],
+    per_pos_norm: &[f32],
+    importance_weight: &[f32],
+    dl_dout: &mut [f32],
+    loss_acc: &mut f64,
+    lambda: f32,
+    nnue2score: f32,
+    in_scaling: f32,
+    in_offset: f32,
+    target_offset: f32,
+    target_scaling: f32,
+    pow_exp: f32,
+    qp_asymmetry: f32,
+    weight_boost_w1: f32,
+    weight_boost_w2: f32,
+    extended: bool,
+    n: usize,
+) {
+    loss_wrm_cpu_impl(
+        out,
+        score,
+        wdl,
+        per_pos_norm,
+        Some(importance_weight),
+        dl_dout,
+        loss_acc,
+        lambda,
+        nnue2score,
+        in_scaling,
+        in_offset,
+        target_offset,
+        target_scaling,
+        pow_exp,
+        qp_asymmetry,
+        weight_boost_w1,
+        weight_boost_w2,
+        extended,
+        n,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn loss_wrm_cpu_impl(
+    out: &[f32],
+    score: &[f32],
+    wdl: &[f32],
+    per_pos_norm: &[f32],
+    importance_weight: Option<&[f32]>,
+    dl_dout: &mut [f32],
+    loss_acc: &mut f64,
+    lambda: f32,
+    nnue2score: f32,
+    in_scaling: f32,
+    in_offset: f32,
+    target_offset: f32,
+    target_scaling: f32,
+    pow_exp: f32,
+    qp_asymmetry: f32,
+    weight_boost_w1: f32,
+    weight_boost_w2: f32,
+    extended: bool,
+    n: usize,
+) {
     // extended のときだけ先に Σw を確定させる (GPU の wrm_weight_sum 相当)。
     let inv_sum_w = if extended {
         let mut sum_w = 0.0_f64;
-        for &s in score.iter().take(n) {
-            sum_w += wrm_weight(
-                s,
-                target_offset,
-                target_scaling,
-                weight_boost_w1,
-                weight_boost_w2,
-            ) as f64;
+        for (i, &s) in score.iter().take(n).enumerate() {
+            let importance = importance_weight.map_or(1.0, |weights| weights[i]);
+            sum_w += (importance
+                * wrm_weight(
+                    s,
+                    target_offset,
+                    target_scaling,
+                    weight_boost_w1,
+                    weight_boost_w2,
+                )) as f64;
         }
         (1.0_f64 / sum_w) as f32
     } else {
@@ -159,8 +253,9 @@ pub fn loss_wrm_cpu(
 
         let pf = target_wrm;
         let wb_base = (pf - 0.5_f32) * (pf - 0.5_f32) * pf * (1.0_f32 - pf);
-        let weight =
-            1.0_f32 + (2.0_f32.powf(weight_boost_w1) - 1.0_f32) * wb_base.powf(weight_boost_w2);
+        let importance = importance_weight.map_or(1.0, |weights| weights[i]);
+        let weight = importance
+            * (1.0_f32 + (2.0_f32.powf(weight_boost_w1) - 1.0_f32) * wb_base.powf(weight_boost_w2));
         let asym = if qf > target {
             1.0_f32 + qp_asymmetry
         } else {
@@ -801,6 +896,69 @@ mod tests {
                 dl_ext[i]
             );
         }
+    }
+
+    /// importance重みを既存WRM重みへ乗算し、合成後の総和でlossと勾配を正規化する。
+    #[test]
+    fn importance_weight_normalizes_loss_and_gradient() {
+        let out = vec![0.3_f32, -0.8, 2.5];
+        let score = vec![150.0_f32, -1200.0, 5000.0];
+        let wdl = vec![1.0_f32, 0.0, 0.5];
+        let importance = vec![1.0_f32, 0.3_f32.powf(-0.5), 0.1_f32.powf(-0.5)];
+        let n = out.len();
+
+        let mut gradient = vec![0.0_f32; n];
+        let mut loss = 0.0_f64;
+        loss_wrm_cpu_with_importance(
+            &out,
+            &score,
+            &wdl,
+            &vec![1.0_f32 / n as f32; n],
+            &importance,
+            &mut gradient,
+            &mut loss,
+            0.0,
+            600.0,
+            340.0,
+            270.0,
+            270.0,
+            380.0,
+            2.0,
+            0.0,
+            0.0,
+            0.5,
+            true,
+            n,
+        );
+
+        let sigmoid = |x: f32| 1.0_f32 / (1.0_f32 + (-x).exp());
+        let weight_sum: f64 = importance.iter().map(|&weight| weight as f64).sum();
+        let inv_weight_sum = (1.0_f64 / weight_sum) as f32;
+        let mut expected_loss = 0.0_f64;
+        for i in 0..n {
+            let target = 0.5_f32
+                * (1.0_f32 + sigmoid((score[i] - 270.0) / 380.0)
+                    - sigmoid((-score[i] - 270.0) / 380.0));
+            let score_net = out[i] * 600.0;
+            let q = sigmoid((score_net - 270.0) / 340.0);
+            let qm = sigmoid((-score_net - 270.0) / 340.0);
+            let prediction = 0.5_f32 * (1.0_f32 + q - qm);
+            let error = prediction - target;
+            expected_loss += (error * error * importance[i] * n as f32 * inv_weight_sum) as f64;
+
+            let derivative = 0.5_f32 * (600.0 / 340.0) * (q * (1.0_f32 - q) + qm * (1.0_f32 - qm));
+            let expected_gradient = importance[i] * inv_weight_sum * 2.0_f32 * error * derivative;
+            let diff = (gradient[i] - expected_gradient).abs();
+            assert!(
+                diff <= 1e-6 * expected_gradient.abs().max(1e-6),
+                "i={i}: got {} expected {expected_gradient}",
+                gradient[i]
+            );
+        }
+        assert!(
+            approx_eq_f64(loss, expected_loss, 1e-9 * expected_loss.abs().max(1.0)),
+            "loss: got {loss} expected {expected_loss}"
+        );
     }
 
     /// weight boost (w1 > 0) は決着寄り (pf が 0/1 に近い) 局面の loss / grad を増幅し、

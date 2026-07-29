@@ -135,6 +135,7 @@ pub fn loss_wrm(
     score: &[f32],
     wdl: &[f32],
     per_pos_norm: f32, // scalar
+    importance_weight: &[f32],
     mut dl_dout: DisjointSlice<f32>,
     loss_acc: &[f64],
     lambda: f32,
@@ -194,8 +195,9 @@ pub fn loss_wrm(
             // --- extended: nnue-pytorch 一般化 loss (weight boost / pow_exp / asymmetry) ---
             let pf = target_wrm;
             let wb_base = (pf - 0.5_f32) * (pf - 0.5_f32) * pf * (1.0_f32 - pf);
-            let weight =
-                1.0_f32 + (2.0_f32.powf(weight_boost_w1) - 1.0_f32) * wb_base.powf(weight_boost_w2);
+            let weight = importance_weight[i.get()]
+                * (1.0_f32
+                    + (2.0_f32.powf(weight_boost_w1) - 1.0_f32) * wb_base.powf(weight_boost_w2));
             let asym = if qf > target {
                 1.0_f32 + qp_asymmetry
             } else {
@@ -264,6 +266,7 @@ pub fn loss_wrm(
 #[kernel]
 pub fn wrm_weight_sum(
     score: &[f32],
+    importance_weight: &[f32],
     sum_w_acc: &[f64],
     weight_boost_w1: f32,
     weight_boost_w2: f32,
@@ -280,8 +283,8 @@ pub fn wrm_weight_sum(
     let sig_pmt = 1.0_f32 / (1.0_f32 + (-((-s - target_offset) / target_scaling)).exp());
     let pf = 0.5_f32 * (1.0_f32 + sig_pt - sig_pmt);
     let wb_base = (pf - 0.5_f32) * (pf - 0.5_f32) * pf * (1.0_f32 - pf);
-    let weight =
-        1.0_f32 + (2.0_f32.powf(weight_boost_w1) - 1.0_f32) * wb_base.powf(weight_boost_w2);
+    let weight = importance_weight[i.get()]
+        * (1.0_f32 + (2.0_f32.powf(weight_boost_w1) - 1.0_f32) * wb_base.powf(weight_boost_w2));
 
     // SAFETY: `sum_w_acc.len() == 1`、host 側で f64 単一 cell 確保済 (`loss_acc` と同型)。
     let sum_atom = unsafe { &*(sum_w_acc.as_ptr() as *const DeviceAtomicF64) };

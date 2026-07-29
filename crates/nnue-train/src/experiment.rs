@@ -183,6 +183,13 @@ pub struct Params {
     /// drop を生き残った局面の score を `[-c, c]` に飽和させる閾値。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_clamp_abs: Option<i32>,
+    /// 正規化済みの`--prune-bands`値。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune_bands: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune_beta: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune_seed: Option<u64>,
     /// `--init-from` の入力ファイル basename (pretrained start)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init_from: Option<String>,
@@ -654,6 +661,9 @@ mod tests {
             wrm_weight_boost_w2: Some(0.5),
             score_drop_abs: None,
             score_clamp_abs: None,
+            prune_bands: None,
+            prune_beta: None,
+            prune_seed: None,
             init_from: None,
             init_preset: None,
             test_data: None,
