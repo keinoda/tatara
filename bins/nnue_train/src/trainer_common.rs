@@ -137,8 +137,7 @@ pub(crate) struct StepOutput {
 }
 
 /// Smoke / trainer 用の 1 batch 入力データ。
-/// owned 版 (smoke path) と borrowed 版 (train_step path) を統一するため scalar の
-/// `per_pos_norm` を持ち (= 1/n_pos)、ref 化された slice を直接 H2D 投入する。
+/// owned 版 (smoke path) と borrowed 版 (train_step path) を統一する。
 pub(crate) struct BatchData<'a> {
     pub(crate) n_pos: usize,
     pub(crate) stm_indices: &'a [i32], // (n_pos × max_active)、-1 padding 可
@@ -147,7 +146,9 @@ pub(crate) struct BatchData<'a> {
     pub(crate) bucket_idx: &'a [i32], // (n_pos)、progress-kpabs が emit する 0..num_buckets-1
     pub(crate) score: &'a [f32], // (n_pos)、target eval cp の元
     pub(crate) wdl: &'a [f32], // (n_pos)、0.0 (Loss) / 0.5 (Draw) / 1.0 (Win)
-    pub(crate) per_pos_norm: f32, // 1/n_pos scalar (loss kernel が `norm[bi]` を本値の broadcast で読む)
+    pub(crate) per_pos_norm: f32, // 1/n_posのscalar
+    pub(crate) importance_weight: &'a [f32], // (n_pos)、動的間引きの補正重み
+    pub(crate) importance_enabled: bool,
 }
 
 /// `BatchData` を owned 形で組み立てるための一時 buffer (smoke / test 用)。本体 train_step
@@ -160,6 +161,7 @@ pub(crate) struct BatchDataOwned {
     pub(crate) bucket_idx: Vec<i32>,
     pub(crate) score: Vec<f32>,
     pub(crate) wdl: Vec<f32>,
+    pub(crate) importance_weight: Vec<f32>,
 }
 
 impl BatchDataOwned {
@@ -174,6 +176,8 @@ impl BatchDataOwned {
             score: &self.score,
             wdl: &self.wdl,
             per_pos_norm: if n == 0 { 0.0 } else { 1.0_f32 / n as f32 },
+            importance_weight: &self.importance_weight,
+            importance_enabled: false,
         }
     }
 }
@@ -214,6 +218,7 @@ impl BatchData<'_> {
             bucket_idx: vec![0_i32; n_pos],
             score: vec![0.0_f32; n_pos],
             wdl: vec![0.5_f32; n_pos],
+            importance_weight: vec![1.0_f32; n_pos],
         }
     }
 
@@ -269,6 +274,8 @@ impl BatchData<'_> {
             score: &batch.score[..n_pos],
             wdl: &batch.wdl[..n_pos],
             per_pos_norm: norm,
+            importance_weight: &batch.per_pos_norm[..n_pos],
+            importance_enabled: batch.importance_enabled,
         }
     }
 }
@@ -1022,7 +1029,7 @@ impl Drop for AsyncLossRing {
     }
 }
 
-/// step 先頭の入力 H2D (`stm/nstm idx` + `bucket/score/wdl` の 5 buffer) を専用
+/// step 先頭の入力 H2D (`stm/nstm idx` + `bucket/score/wdl/importance` の 7 buffer) を専用
 /// copy stream で発行し、直前 step の compute と overlap させる ring。
 ///
 /// 入力は dataloader から pageable な `Vec` で来る。pageable のままだと
@@ -1048,6 +1055,7 @@ pub(crate) struct InputUploadRing {
     pinned_bucket: Option<[*mut i32; 2]>,
     pinned_score: [*mut f32; 2],
     pinned_wdl: [*mut f32; 2],
+    pinned_importance: [*mut f32; 2],
     /// 各 slot の H2D 完了 event (copy stream に record)。compute stream が forward 前に待つ。
     h2d_done: [CudaEvent; 2],
     /// 各 slot を使った step の compute 完了 event (compute stream に record、
@@ -1113,6 +1121,7 @@ impl InputUploadRing {
             pinned_bucket,
             pinned_score: alloc_pinned_host::<f32>(cap_scalar)?,
             pinned_wdl: alloc_pinned_host::<f32>(cap_scalar)?,
+            pinned_importance: alloc_pinned_host::<f32>(cap_scalar)?,
             h2d_done: [ctx.new_event(None)?, ctx.new_event(None)?],
             step_done: [ctx.new_event(None)?, ctx.new_event(None)?],
             cap_idx,
@@ -1121,7 +1130,7 @@ impl InputUploadRing {
         })
     }
 
-    /// `batch` の入力 6 slice を pinned 経由で `dev_*` (caller が swap で active 化した
+    /// `batch` の入力 7 slice を pinned 経由で `dev_*` (caller が swap で active 化した
     /// device buffer) へ copy stream で async H2D し、`compute_stream` に H2D 完了を
     /// 待たせる。
     ///
@@ -1144,6 +1153,8 @@ impl InputUploadRing {
         h_score: &[f32],
         dev_wdl: &DeviceBuffer<f32>,
         h_wdl: &[f32],
+        dev_importance: &DeviceBuffer<f32>,
+        h_importance: &[f32],
     ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             h_stm.len() <= self.cap_idx && h_nstm.len() <= self.cap_idx,
@@ -1155,7 +1166,8 @@ impl InputUploadRing {
             h_bucket.len() <= self.cap_scalar
                 && h_nnz.len() <= self.cap_scalar
                 && h_score.len() <= self.cap_scalar
-                && h_wdl.len() <= self.cap_scalar,
+                && h_wdl.len() <= self.cap_scalar
+                && h_importance.len() <= self.cap_scalar,
             "input batch (scalar) exceeds pinned capacity {}",
             self.cap_scalar
         );
@@ -1186,6 +1198,11 @@ impl InputUploadRing {
             std::ptr::copy_nonoverlapping(h_bucket.as_ptr(), pinned_bucket[slot], h_bucket.len());
             std::ptr::copy_nonoverlapping(h_score.as_ptr(), self.pinned_score[slot], h_score.len());
             std::ptr::copy_nonoverlapping(h_wdl.as_ptr(), self.pinned_wdl[slot], h_wdl.len());
+            std::ptr::copy_nonoverlapping(
+                h_importance.as_ptr(),
+                self.pinned_importance[slot],
+                h_importance.len(),
+            );
         }
         // device: pinned[slot] → dev_* (copy stream で async H2D)。
         // SAFETY: 各 pinned[slot] は直上の copy_nonoverlapping で先頭 `h_*.len()` 要素を
@@ -1223,6 +1240,11 @@ impl InputUploadRing {
                 dev_wdl,
                 std::slice::from_raw_parts(self.pinned_wdl[slot], h_wdl.len()),
             )?;
+            copy_host_to_device_async_f32(
+                cs,
+                dev_importance,
+                std::slice::from_raw_parts(self.pinned_importance[slot], h_importance.len()),
+            )?;
         }
         self.h2d_done[slot].record(cs)?;
         // compute stream は H2D 完了後に forward が input を読むよう待つ。
@@ -1230,7 +1252,7 @@ impl InputUploadRing {
         Ok(())
     }
 
-    /// Simple アーキ用 upload: bucket buffer を持たない 5 buffer 版
+    /// Simple アーキ用 upload: bucket buffer を持たない 6 buffer 版
     /// (stm/nstm/nnz/score/wdl)。
     /// 動作セマンティクスは [`upload`](Self::upload) と同じ — caller が active/back を
     /// `mem::swap` 済の `dev_*` に対し pinned 経由 copy stream で先行 H2D し、compute
@@ -1249,6 +1271,8 @@ impl InputUploadRing {
         h_score: &[f32],
         dev_wdl: &DeviceBuffer<f32>,
         h_wdl: &[f32],
+        dev_importance: &DeviceBuffer<f32>,
+        h_importance: &[f32],
     ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             self.pinned_bucket.is_none(),
@@ -1264,7 +1288,8 @@ impl InputUploadRing {
         assert!(
             h_nnz.len() <= self.cap_scalar
                 && h_score.len() <= self.cap_scalar
-                && h_wdl.len() <= self.cap_scalar,
+                && h_wdl.len() <= self.cap_scalar
+                && h_importance.len() <= self.cap_scalar,
             "input batch (scalar) exceeds pinned capacity {}",
             self.cap_scalar
         );
@@ -1281,6 +1306,11 @@ impl InputUploadRing {
             std::ptr::copy_nonoverlapping(h_nnz.as_ptr(), self.pinned_nnz[slot], h_nnz.len());
             std::ptr::copy_nonoverlapping(h_score.as_ptr(), self.pinned_score[slot], h_score.len());
             std::ptr::copy_nonoverlapping(h_wdl.as_ptr(), self.pinned_wdl[slot], h_wdl.len());
+            std::ptr::copy_nonoverlapping(
+                h_importance.as_ptr(),
+                self.pinned_importance[slot],
+                h_importance.len(),
+            );
         }
         let cs: &CudaStream = &self.copy_stream;
         // SAFETY: pinned[slot] は直上で先頭 `h_*.len()` 要素を初期化済、`from_raw_parts`
@@ -1310,6 +1340,11 @@ impl InputUploadRing {
                 cs,
                 dev_wdl,
                 std::slice::from_raw_parts(self.pinned_wdl[slot], h_wdl.len()),
+            )?;
+            copy_host_to_device_async_f32(
+                cs,
+                dev_importance,
+                std::slice::from_raw_parts(self.pinned_importance[slot], h_importance.len()),
             )?;
         }
         self.h2d_done[slot].record(cs)?;
@@ -1356,7 +1391,12 @@ impl Drop for InputUploadRing {
                 }
             }
         }
-        for slot in self.pinned_score.iter().chain(self.pinned_wdl.iter()) {
+        for slot in self
+            .pinned_score
+            .iter()
+            .chain(self.pinned_wdl.iter())
+            .chain(self.pinned_importance.iter())
+        {
             if !slot.is_null() {
                 // SAFETY: 同上。
                 unsafe {

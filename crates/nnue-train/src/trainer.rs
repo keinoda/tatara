@@ -57,7 +57,9 @@ use shogi_features::FeatureSetSpec;
 #[cfg(test)]
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
 
-use crate::dataloader::{Batch, BucketMode, BucketedPrefetchedLoader, PSV_RECORD_BYTES};
+use crate::dataloader::{
+    Batch, BucketMode, BucketedPrefetchedLoader, PSV_RECORD_BYTES, PruneConfig,
+};
 use crate::experiment::ExperimentLogger;
 use crate::schedule::{LrScheduler, WdlScheduler};
 
@@ -424,6 +426,8 @@ pub struct TrainingConfig {
     /// 単一の上限へ正規化する用途。i16 なのは PSV score の表現域に合わせ、
     /// 消費側の縮小 cast (wrap) を型で不可能にするため。
     pub score_clamp_abs: Option<i16>,
+    /// 学習streamだけに適用する動的な評価値依存サンプリング。
+    pub prune_config: Option<PruneConfig>,
     /// dataloader の prefetch worker 数 (`--threads`)。`0` は `1` 扱い。
     /// `1` で決定論的逐次 read 相当、`>= 2` で並列パース (1 epoch 内の
     /// position 順序は非決定的になる; [`BucketedPrefetchedLoader`] doc 参照)。
@@ -497,6 +501,16 @@ impl TrainingConfig {
             ));
         }
         self.loss.validate()?;
+        if self
+            .prune_config
+            .as_ref()
+            .is_some_and(PruneConfig::importance_enabled)
+            && matches!(self.loss, LossKind::Sigmoid { .. })
+        {
+            return Err(io::Error::other(
+                "importance-weight correction is supported only by WRM loss",
+            ));
+        }
         if let Some(t) = self.score_drop_abs
             && t < 1
         {
@@ -683,11 +697,12 @@ where
         None => file_size,
     };
 
-    let mut loader = BucketedPrefetchedLoader::spawn(
+    let mut loader = BucketedPrefetchedLoader::spawn_with_pruning(
         data_path,
         cfg.batch_size,
         cfg.score_drop_abs,
         cfg.score_clamp_abs,
+        cfg.prune_config.clone(),
         cfg.threads,
         (*bucket_mode).into(),
         cfg.feature_set,
@@ -699,7 +714,7 @@ where
 
     println!(
         "[train] data={} | net_id={} | superbatches {}..={} | {} batches/sb x bs {} \
-         | lr-sched: {lr_scheduler} | wdl-sched: {wdl_scheduler} | loss: {} | score-drop-abs {:?} | score-clamp-abs {:?} | dataloader threads {}",
+         | lr-sched: {lr_scheduler} | wdl-sched: {wdl_scheduler} | loss: {} | score-drop-abs {:?} | score-clamp-abs {:?} | prune {:?} | dataloader threads {}",
         data_path.display(),
         cfg.net_id,
         cfg.start_superbatch,
@@ -709,6 +724,7 @@ where
         cfg.loss,
         cfg.score_drop_abs,
         cfg.score_clamp_abs,
+        cfg.prune_config,
         cfg.threads.max(1),
     );
 
@@ -1288,6 +1304,7 @@ mod tests {
             loss: LossKind::Sigmoid { scale: 1.0 / 290.0 },
             score_drop_abs: None,
             score_clamp_abs: None,
+            prune_config: None,
             threads: 2,
             test_data: None,
             test_positions: 0,
@@ -1500,6 +1517,9 @@ mod tests {
             wrm_weight_boost_w2: None,
             score_drop_abs: None,
             score_clamp_abs: None,
+            prune_bands: None,
+            prune_beta: None,
+            prune_seed: None,
             init_from: None,
             init_preset: None,
             test_data: None,

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 #[cfg(any(feature = "gpu", test))]
 use nnue_format::ArchKind;
+use nnue_train::dataloader::PruneBands;
 
 use crate::arch::*;
 
@@ -214,6 +215,19 @@ pub(crate) struct Cli {
     /// different ceilings. Must be in `[1, 32767]`.
     #[arg(long, global = true, value_parser = clap::value_parser!(i16).range(1..))]
     pub(crate) score_clamp_abs: Option<i16>,
+
+    /// 評価値絶対値の上限（上限を含む）ごとに局面を保持する。
+    /// 例: `1500:1.0,3000:0.3,inf:0.1`
+    #[arg(long, global = true)]
+    pub(crate) prune_bands: Option<PruneBands>,
+
+    /// Importance補正の指数。確率pで保持した局面へ重み`(1/p)^beta`を与える。
+    #[arg(long, default_value_t = 0.0, global = true)]
+    pub(crate) prune_beta: f32,
+
+    /// 評価値依存サンプリングを決定論的に再現するseed。
+    #[arg(long, default_value_t = 0, global = true)]
+    pub(crate) prune_seed: u64,
 
     /// Inject weights from a quantised NNUE binary before training starts
     /// (pretrained start). The optimizer state (m/v/slow/step) is

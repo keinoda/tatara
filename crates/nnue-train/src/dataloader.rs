@@ -24,6 +24,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -35,6 +36,172 @@ use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, S
 /// 40-byte struct). Used everywhere we compute byte offsets, validate range
 /// alignment, or convert between record counts and file sizes.
 pub const PSV_RECORD_BYTES: u64 = 40;
+
+/// 教師分布調査と共通の詰みstamp境界。
+pub const MATE_STAMP_ABS: i32 = 32_000;
+
+/// 評価値依存サンプリングで使う、上限付きの保持帯。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PruneBand {
+    /// 上限値を含む。`None`は末尾に必須の`inf`帯を表す。
+    pub upper_abs: Option<i32>,
+    /// この帯に属するrecordを保持する確率。
+    pub keep_probability: f32,
+}
+
+/// 上限値の昇順に並んだ評価値依存の保持帯。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PruneBands {
+    bands: Vec<PruneBand>,
+}
+
+impl PruneBands {
+    /// 設定済みの帯を上限値の昇順で返す。
+    pub fn bands(&self) -> &[PruneBand] {
+        &self.bands
+    }
+
+    fn keep_probability(&self, score: i16) -> f32 {
+        let abs_score = i64::from(score).abs();
+        if abs_score >= i64::from(MATE_STAMP_ABS) {
+            return self
+                .bands
+                .last()
+                .expect("PruneBands always has a terminal band")
+                .keep_probability;
+        }
+        self.bands
+            .iter()
+            .find(|band| {
+                band.upper_abs
+                    .is_none_or(|upper| abs_score <= i64::from(upper))
+            })
+            .expect("PruneBands always has a terminal band")
+            .keep_probability
+    }
+}
+
+impl FromStr for PruneBands {
+    type Err = String;
+
+    fn from_str(spec: &str) -> Result<Self, Self::Err> {
+        let mut bands = Vec::new();
+        let mut previous_upper = None;
+        for raw_band in spec.split(',') {
+            let raw_band = raw_band.trim();
+            let (raw_upper, raw_probability) = raw_band.split_once(':').ok_or_else(|| {
+                format!(
+                    "invalid prune band '{raw_band}': expected UPPER:PROBABILITY, for example 1500:1.0"
+                )
+            })?;
+            let upper_abs = if raw_upper.trim().eq_ignore_ascii_case("inf") {
+                None
+            } else {
+                let upper = raw_upper.trim().parse::<i32>().map_err(|e| {
+                    format!("invalid prune-band upper bound '{}': {e}", raw_upper.trim())
+                })?;
+                if upper < 0 {
+                    return Err(format!("prune-band upper bound must be >= 0, got {upper}"));
+                }
+                if let Some(previous) = previous_upper
+                    && upper <= previous
+                {
+                    return Err(format!(
+                        "prune-band upper bounds must be strictly increasing, got {upper} after {previous}"
+                    ));
+                }
+                previous_upper = Some(upper);
+                Some(upper)
+            };
+            let keep_probability = raw_probability.trim().parse::<f32>().map_err(|e| {
+                format!(
+                    "invalid prune-band probability '{}': {e}",
+                    raw_probability.trim()
+                )
+            })?;
+            if !keep_probability.is_finite() || keep_probability <= 0.0 || keep_probability > 1.0 {
+                return Err(format!(
+                    "prune-band probability must be finite and in (0, 1], got {keep_probability}"
+                ));
+            }
+            bands.push(PruneBand {
+                upper_abs,
+                keep_probability,
+            });
+            if bands.len() >= 2 && bands[bands.len() - 2].upper_abs.is_none() {
+                return Err("the inf prune band must be last".to_string());
+            }
+        }
+        if bands.is_empty() {
+            return Err("prune bands must not be empty".to_string());
+        }
+        if bands.last().is_none_or(|band| band.upper_abs.is_some()) {
+            return Err("prune bands must end with an inf band".to_string());
+        }
+        Ok(Self { bands })
+    }
+}
+
+impl std::fmt::Display for PruneBands {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, band) in self.bands.iter().enumerate() {
+            if index > 0 {
+                write!(f, ",")?;
+            }
+            match band.upper_abs {
+                Some(upper) => write!(f, "{upper}:{}", band.keep_probability)?,
+                None => write!(f, "inf:{}", band.keep_probability)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 動的な評価値依存サンプリングとimportance重み補正。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PruneConfig {
+    pub bands: PruneBands,
+    pub beta: f32,
+    pub seed: u64,
+}
+
+impl PruneConfig {
+    /// 動的間引き設定を検証して構築する。
+    pub fn new(bands: PruneBands, beta: f32, seed: u64) -> Result<Self, String> {
+        if !beta.is_finite() || !(0.0..=1.0).contains(&beta) {
+            return Err(format!(
+                "prune beta must be finite and in [0, 1], got {beta}"
+            ));
+        }
+        Ok(Self { bands, beta, seed })
+    }
+
+    /// recordの絶対位置とepochに対する`(保持するか, importance重み)`を返す。
+    pub fn sample(&self, score: i16, record_index: u64, epoch: u64) -> (bool, f32) {
+        let probability = self.bands.keep_probability(score);
+        let retained =
+            probability == 1.0 || deterministic_unit(self.seed, record_index, epoch) < probability;
+        let importance_weight = probability.powf(-self.beta);
+        (retained, importance_weight)
+    }
+
+    /// 保持局面が1以外のloss重みを必要とするかを返す。
+    pub fn importance_enabled(&self) -> bool {
+        self.beta != 0.0
+    }
+}
+
+/// record識別子とepochから導出する、状態を持たない`[0, 1)`の疑似乱数。
+fn deterministic_unit(seed: u64, record_index: u64, epoch: u64) -> f32 {
+    let mut value = seed
+        ^ record_index.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ epoch.wrapping_mul(0xd1b5_4a32_d192_ed03);
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    ((value >> 40) as f32) * (1.0_f32 / 16_777_216.0_f32)
+}
 
 /// Sequential reader for 38-byte Apery / dlshogi HCPE records.
 pub struct HcpeFileLoader {
@@ -121,8 +288,8 @@ impl From<ShogiProgressKPAbs> for BucketMode {
 /// - `score`: raw cp (`PackedSfenValue::score` の i16 を f32 cast)
 /// - `wdl`: game result を `{0.0, 0.5, 1.0}` に正規化 (Loss → 0.0, Draw → 0.5,
 ///   Win → 1.0)
-/// - `per_pos_norm`: batch averaging 用 weight (default 1.0、trainer 側で
-///   override 可能)
+/// - `per_pos_norm`: position ごとの importance weight (default 1.0)。batch
+///   normalization は loss kernel が別に行う
 /// - `n_positions`: 実際に詰めた数。下流はどの buffer も `n_positions` (index は
 ///   `n_positions * max_active`) までしか読まないため、`[n_positions, batch_size)` の
 ///   末尾行の内容は未規定
@@ -141,6 +308,8 @@ pub struct Batch {
     pub score: Vec<f32>,
     pub wdl: Vec<f32>,
     pub per_pos_norm: Vec<f32>,
+    /// `per_pos_norm`をloss正規化へ含める場合は`true`。
+    pub importance_enabled: bool,
     pub n_positions: usize,
 }
 
@@ -159,6 +328,7 @@ impl Batch {
             score: vec![0.0; batch_size],
             wdl: vec![0.0; batch_size],
             per_pos_norm: vec![1.0; batch_size],
+            importance_enabled: false,
             n_positions: 0,
         }
     }
@@ -174,9 +344,10 @@ impl Batch {
     /// max_active`) までしか読まない (`BatchData::from_batch_inner` の slice、kernel の
     /// `b = n_positions` launch、per-slot kernel の `nnz` early-out)。実長超の slot や
     /// `[n_positions, batch_size)` の行に前 batch の残骸が残るが、上流にも下流にも
-    /// 観測されない。`per_pos_norm` Vec は下流が scalar `1/n_pos` を再計算するため未使用。
+    /// 観測されない。importance-weight 使用有無は batch ごとに再設定する。
     pub fn reset(&mut self) {
         self.n_positions = 0;
+        self.importance_enabled = false;
     }
 
     /// 1 position を batch に追加。`Ok(true)` 成功、`Ok(false)` は batch 満杯、
@@ -219,6 +390,17 @@ impl Batch {
     pub fn push_decoded_counting(
         &mut self,
         board: &ShogiBoard,
+        active_hist: Option<&mut [u64]>,
+    ) -> io::Result<bool> {
+        self.push_decoded_counting_weighted(board, 1.0, false, active_hist)
+    }
+
+    /// [`Batch::push_decoded_counting`] に importance weight を付与する版。
+    pub fn push_decoded_counting_weighted(
+        &mut self,
+        board: &ShogiBoard,
+        importance_weight: f32,
+        importance_enabled: bool,
         active_hist: Option<&mut [u64]>,
     ) -> io::Result<bool> {
         if self.n_positions >= self.batch_size {
@@ -264,7 +446,8 @@ impl Batch {
             r if r < 0 => 0.0,
             _ => 0.5,
         };
-        // per_pos_norm はデフォルト 1.0 (with_capacity 時に初期化済)。
+        self.per_pos_norm[bi] = importance_weight;
+        self.importance_enabled |= importance_enabled;
 
         self.n_positions += 1;
         Ok(true)
@@ -522,6 +705,11 @@ struct PsvEpochReader {
     loader: PsvFileLoader,
     score_drop_abs: Option<i32>,
     score_clamp_abs: Option<i16>,
+    prune_config: Option<PruneConfig>,
+    /// この範囲で次に読むraw recordのPSV絶対index。
+    next_record_index: u64,
+    /// 0始まりのfile周回数。設定範囲を一周するたびに増加する。
+    epoch: u64,
     /// 直近の reopen 以降に実際に返した (= drop されなかった) position 数。
     pushed_this_epoch: u64,
     /// 1 epoch 丸ごと 0 push だった連続回数。
@@ -532,12 +720,31 @@ impl PsvEpochReader {
     /// `path` を `[start_offset, end_offset)` 範囲で epoch wrap させる reader。
     /// wrap 時の再 open も同 range で行う。`PsvFileLoader::new_range` 同様の
     /// 範囲・alignment 検証はここでは行わず、`new_range` 内で検証する。
+    #[cfg(test)]
     fn new_range(
         path: &Path,
         start_offset: u64,
         end_offset: u64,
         score_drop_abs: Option<i32>,
         score_clamp_abs: Option<i16>,
+    ) -> io::Result<Self> {
+        Self::new_range_with_pruning(
+            path,
+            start_offset,
+            end_offset,
+            score_drop_abs,
+            score_clamp_abs,
+            None,
+        )
+    }
+
+    fn new_range_with_pruning(
+        path: &Path,
+        start_offset: u64,
+        end_offset: u64,
+        score_drop_abs: Option<i32>,
+        score_clamp_abs: Option<i16>,
+        prune_config: Option<PruneConfig>,
     ) -> io::Result<Self> {
         let loader = PsvFileLoader::new_range(path, start_offset, end_offset)?;
         Ok(Self {
@@ -547,6 +754,9 @@ impl PsvEpochReader {
             loader,
             score_drop_abs,
             score_clamp_abs,
+            prune_config,
+            next_record_index: start_offset / PSV_RECORD_BYTES,
+            epoch: 0,
             pushed_this_epoch: 0,
             barren_passes: 0,
         })
@@ -554,15 +764,28 @@ impl PsvEpochReader {
 
     /// 次の使える PSV を返す。EOF なら file を開き直す (= 次 epoch)。空 file /
     /// 全 drop で `MAX_BARREN_PASSES` 周しても 0 件なら `io::Error` を返す。
-    fn next(&mut self) -> io::Result<PackedSfenValue> {
+    fn next(&mut self) -> io::Result<SampledPsv> {
         loop {
             match self.loader.next_psv()? {
                 Some(mut psv) => {
+                    let record_index = self.next_record_index;
+                    self.next_record_index += 1;
                     // `--score-drop-abs t` 指定時: `|score| >= t` を skip。
                     // i64 cast で `i16::MIN` の abs overflow を避ける。
                     if let Some(t) = self.score_drop_abs
                         && i64::from(psv.score()).abs() >= i64::from(t)
                     {
+                        continue;
+                    }
+                    let (retained, importance_weight, importance_enabled) =
+                        if let Some(prune) = &self.prune_config {
+                            let (retained, weight) =
+                                prune.sample(psv.score(), record_index, self.epoch);
+                            (retained, weight, prune.importance_enabled())
+                        } else {
+                            (true, 1.0, false)
+                        };
+                    if !retained {
                         continue;
                     }
                     // `--score-clamp-abs c` 指定時: 生き残った position の score を
@@ -574,7 +797,11 @@ impl PsvEpochReader {
                         psv.set_score(psv.score().clamp(-c, c));
                     }
                     self.pushed_this_epoch += 1;
-                    return Ok(psv);
+                    return Ok(SampledPsv {
+                        psv,
+                        importance_weight,
+                        importance_enabled,
+                    });
                 }
                 None => {
                     if self.pushed_this_epoch == 0 {
@@ -596,10 +823,18 @@ impl PsvEpochReader {
                     self.pushed_this_epoch = 0;
                     self.loader =
                         PsvFileLoader::new_range(&self.path, self.start_offset, self.end_offset)?;
+                    self.next_record_index = self.start_offset / PSV_RECORD_BYTES;
+                    self.epoch = self.epoch.wrapping_add(1);
                 }
             }
         }
     }
+}
+
+struct SampledPsv {
+    psv: PackedSfenValue,
+    importance_weight: f32,
+    importance_enabled: bool,
 }
 
 // =============================================================================
@@ -706,6 +941,38 @@ impl BucketedPrefetchedLoader {
         train_end_offset: u64,
         monitor_active: bool,
     ) -> io::Result<Self> {
+        Self::spawn_with_pruning(
+            path,
+            batch_size,
+            score_drop_abs,
+            score_clamp_abs,
+            None,
+            num_workers,
+            bucket_mode,
+            feature_set,
+            compute_bucket,
+            num_buckets,
+            train_end_offset,
+            monitor_active,
+        )
+    }
+
+    /// [`Self::spawn`]と同じloaderを動的な評価値依存サンプリング付きで生成する。
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_pruning(
+        path: &Path,
+        batch_size: usize,
+        score_drop_abs: Option<i32>,
+        score_clamp_abs: Option<i16>,
+        prune_config: Option<PruneConfig>,
+        num_workers: usize,
+        bucket_mode: impl Into<BucketMode>,
+        feature_set: FeatureSetSpec,
+        compute_bucket: bool,
+        num_buckets: usize,
+        train_end_offset: u64,
+        monitor_active: bool,
+    ) -> io::Result<Self> {
         assert!(
             num_buckets >= 1,
             "BucketedPrefetchedLoader requires num_buckets >= 1"
@@ -719,12 +986,13 @@ impl BucketedPrefetchedLoader {
         // が最大 1、main が最大 1。
         let n_slots = prefetch_depth + num_workers + 1;
 
-        let reader = Arc::new(Mutex::new(PsvEpochReader::new_range(
+        let reader = Arc::new(Mutex::new(PsvEpochReader::new_range_with_pruning(
             path,
             0,
             train_end_offset,
             score_drop_abs,
             score_clamp_abs,
+            prune_config,
         )?));
         let err_slot: Arc<Mutex<Option<io::Error>>> = Arc::new(Mutex::new(None));
         let active_hist: Option<Arc<Mutex<Vec<u64>>>> = if monitor_active {
@@ -758,7 +1026,7 @@ impl BucketedPrefetchedLoader {
             let active_hist = active_hist.clone();
             let handle = thread::spawn(move || {
                 // 各 worker 専有の生 PSV scratch (iteration をまたいで reuse)。
-                let mut scratch: Vec<PackedSfenValue> = Vec::with_capacity(batch_size);
+                let mut scratch: Vec<SampledPsv> = Vec::with_capacity(batch_size);
                 // batch-local な active-feature histogram (計装 on のときだけ確保)。
                 // batch 末に共有 `active_hist` へ一括加算 → 1 position ごとの lock を
                 // 避ける。
@@ -809,9 +1077,14 @@ impl BucketedPrefetchedLoader {
                     // (Simple アーキ) では bucket mode ごとの per-position 計算を skip し worker CPU を
                     // 軽くする。Simple backend は `bucket_idx` を参照しない契約。
                     let mut overflow: Option<io::Error> = None;
-                    for psv in &scratch {
-                        let board = psv.decode();
-                        match batch.push_decoded_counting(&board, local_hist.as_deref_mut()) {
+                    for sampled in &scratch {
+                        let board = sampled.psv.decode();
+                        match batch.push_decoded_counting_weighted(
+                            &board,
+                            sampled.importance_weight,
+                            sampled.importance_enabled,
+                            local_hist.as_deref_mut(),
+                        ) {
                             Ok(pushed) => {
                                 debug_assert!(
                                     pushed,
@@ -1719,7 +1992,7 @@ mod tests {
 
         let mut reader =
             PsvEpochReader::new_range(&tmp, 0, bytes.len() as u64, Some(32000), Some(100)).unwrap();
-        let got: Vec<i16> = (0..5).map(|_| reader.next().unwrap().score()).collect();
+        let got: Vec<i16> = (0..5).map(|_| reader.next().unwrap().psv.score()).collect();
         std::fs::remove_file(&tmp).ok();
         assert_eq!(got, vec![0, 50, -50, 100, -100]);
     }
@@ -1754,5 +2027,141 @@ mod tests {
             "got: {err}"
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    fn test_prune_config(beta: f32, seed: u64) -> PruneConfig {
+        PruneConfig::new(
+            "1500:1.0,3000:0.3,inf:0.1"
+                .parse()
+                .expect("valid prune bands"),
+            beta,
+            seed,
+        )
+        .expect("valid prune config")
+    }
+
+    #[test]
+    fn prune_band_boundaries_and_importance_weights() {
+        let prune = test_prune_config(0.5, 7);
+        let cases = [
+            (1500_i16, 1.0_f32),
+            (1501_i16, (1.0_f32 / 0.3_f32).sqrt()),
+            (3000_i16, (1.0_f32 / 0.3_f32).sqrt()),
+            (3001_i16, 10.0_f32.sqrt()),
+            (-3001_i16, 10.0_f32.sqrt()),
+            (32000_i16, 10.0_f32.sqrt()),
+        ];
+        for (index, (score, expected)) in cases.into_iter().enumerate() {
+            let (_, actual) = prune.sample(score, index as u64, 0);
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "score={score}: actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn mate_stamp_uses_terminal_band() {
+        let prune = PruneConfig::new(
+            "31000:0.8,inf:0.1".parse().expect("valid prune bands"),
+            1.0,
+            0,
+        )
+        .expect("valid prune config");
+        let (_, below_stamp_weight) = prune.sample(31_000, 0, 0);
+        let (_, stamp_weight) = prune.sample(32_000, 0, 0);
+        assert!((below_stamp_weight - 1.25).abs() < 1.0e-6);
+        assert!((stamp_weight - 10.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn prune_sampling_is_seed_reproducible_and_epoch_specific() {
+        let a = test_prune_config(0.5, 1234);
+        let b = test_prune_config(0.5, 1234);
+        let c = test_prune_config(0.5, 1235);
+        let sample = |prune: &PruneConfig, epoch| {
+            (0..10_000_u64)
+                .map(|record| prune.sample(2_000, record, epoch).0)
+                .collect::<Vec<_>>()
+        };
+        let a_epoch0 = sample(&a, 0);
+        assert_eq!(a_epoch0, sample(&b, 0));
+        assert_ne!(a_epoch0, sample(&c, 0));
+        assert_ne!(a_epoch0, sample(&a, 1));
+    }
+
+    #[test]
+    fn prune_sampling_rates_converge_to_band_probabilities() {
+        let prune = test_prune_config(0.5, 42);
+        let n = 500_000_u64;
+        for (score, expected, tolerance) in [
+            (1_000_i16, 1.0_f64, 0.0_f64),
+            (2_000_i16, 0.3_f64, 0.003_f64),
+            (4_000_i16, 0.1_f64, 0.002_f64),
+        ] {
+            let retained = (0..n)
+                .filter(|&record| prune.sample(score, record, 3).0)
+                .count();
+            let observed = retained as f64 / n as f64;
+            assert!(
+                (observed - expected).abs() <= tolerance,
+                "score={score}: observed={observed}, expected={expected}, tolerance={tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn psv_epoch_reader_prunes_and_attaches_importance_weights() {
+        let scores = [1_000_i16, 2_000, 4_000, 32_000]
+            .into_iter()
+            .cycle()
+            .take(4_000)
+            .collect::<Vec<_>>();
+        let mut bytes = Vec::with_capacity(scores.len() * PSV_RECORD_BYTES as usize);
+        for &score in &scores {
+            let mut record = [0_u8; PSV_RECORD_BYTES as usize];
+            record[32..34].copy_from_slice(&score.to_le_bytes());
+            bytes.extend_from_slice(&record);
+        }
+        let path = std::env::temp_dir().join(format!(
+            "nnue-train-prune-reader-{}.psv",
+            std::process::id()
+        ));
+        std::fs::write(&path, &bytes).expect("write synthetic PSV");
+
+        let prune = test_prune_config(0.5, 42);
+        let expected = scores
+            .iter()
+            .enumerate()
+            .filter_map(|(record_index, &score)| {
+                let (retained, weight) = prune.sample(score, record_index as u64, 0);
+                retained.then_some((score, weight))
+            })
+            .collect::<Vec<_>>();
+        assert!(expected.len() < scores.len());
+
+        let mut reader = PsvEpochReader::new_range_with_pruning(
+            &path,
+            0,
+            bytes.len() as u64,
+            None,
+            None,
+            Some(prune),
+        )
+        .expect("open synthetic PSV");
+        let actual = (0..expected.len())
+            .map(|_| {
+                let sampled = reader.next().expect("read retained PSV");
+                assert!(sampled.importance_enabled);
+                (sampled.psv.score(), sampled.importance_weight)
+            })
+            .collect::<Vec<_>>();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.0, expected.0);
+            assert!((actual.1 - expected.1).abs() < 1.0e-6);
+        }
     }
 }

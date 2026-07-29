@@ -40,7 +40,7 @@ use gpu_kernels::layerstack::{
     slice2d::{slice_extract_2d_cpu, slice_scatter_2d_cpu},
 };
 use gpu_kernels::pointwise::loss_wdl::loss_wdl_cpu;
-use gpu_kernels::pointwise::loss_wrm::loss_wrm_cpu;
+use gpu_kernels::pointwise::loss_wrm::{loss_wrm_cpu, loss_wrm_cpu_with_importance};
 use gpu_kernels::pointwise::norm_loss::{norm_loss_apply_cpu, norm_loss_compute_norms_cpu};
 use gpu_kernels::pointwise::radam_step::{radam_compute_step_size_denom, radam_step_cpu};
 use gpu_kernels::pointwise::ranger_step::{ranger_lookahead_lerp_cpu, ranger_step_cpu};
@@ -3230,6 +3230,7 @@ fn loss_wrm_default_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let out_dev = DeviceBuffer::from_host(&stream, &out)?;
     let score_dev = DeviceBuffer::from_host(&stream, &score)?;
     let wdl_dev = DeviceBuffer::from_host(&stream, &wdl)?;
+    let importance_dev = DeviceBuffer::from_host(&stream, &vec![1.0_f32; b])?;
     let mut dl_dev = DeviceBuffer::<f32>::zeroed(&stream, b)?;
     let loss_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
     let sum_w_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
@@ -3240,6 +3241,7 @@ fn loss_wrm_default_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             kernel: loss_wrm, stream: stream, module: module, config: cfg_1d(b),
             args: [
                 slice(out_dev), slice(score_dev), slice(wdl_dev), per_pos_norm,
+                slice(importance_dev),
                 slice_mut(dl_dev), slice(loss_dev), lambda,
                 WRM_NNUE2SCORE, WRM_IN_SCALING, WRM_IN_OFFSET, WRM_TARGET_OFFSET, WRM_TARGET_SCALING,
                 2.0_f32, 0.0_f32, 0.0_f32, 0.5_f32, slice(sum_w_dev), 0_u32, b as u32
@@ -3280,14 +3282,23 @@ fn loss_wrm_extended_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let qp = 0.3_f32;
     let w1 = 1.0_f32;
     let w2 = 0.5_f32;
+    let importance = vec![
+        1.0_f32,
+        0.3_f32.powf(-0.5),
+        0.1_f32.powf(-0.5),
+        1.0,
+        2.0,
+        0.75,
+    ];
 
     let mut dl_cpu = vec![0.0_f32; b];
     let mut loss_cpu = 0.0_f64;
-    loss_wrm_cpu(
+    loss_wrm_cpu_with_importance(
         &out,
         &score,
         &wdl,
         &vec![per_pos_norm; b],
+        &importance,
         &mut dl_cpu,
         &mut loss_cpu,
         lambda,
@@ -3307,6 +3318,7 @@ fn loss_wrm_extended_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let out_dev = DeviceBuffer::from_host(&stream, &out)?;
     let score_dev = DeviceBuffer::from_host(&stream, &score)?;
     let wdl_dev = DeviceBuffer::from_host(&stream, &wdl)?;
+    let importance_dev = DeviceBuffer::from_host(&stream, &importance)?;
     let mut dl_dev = DeviceBuffer::<f32>::zeroed(&stream, b)?;
     let loss_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
     let sum_w_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
@@ -3316,7 +3328,7 @@ fn loss_wrm_extended_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         cuda_launch! {
             kernel: wrm_weight_sum, stream: stream, module: module, config: cfg_1d(b),
             args: [
-                slice(score_dev), slice(sum_w_dev), w1, w2,
+                slice(score_dev), slice(importance_dev), slice(sum_w_dev), w1, w2,
                 WRM_TARGET_OFFSET, WRM_TARGET_SCALING, b as u32
             ]
         }
@@ -3328,6 +3340,7 @@ fn loss_wrm_extended_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             kernel: loss_wrm, stream: stream, module: module, config: cfg_1d(b),
             args: [
                 slice(out_dev), slice(score_dev), slice(wdl_dev), per_pos_norm,
+                slice(importance_dev),
                 slice_mut(dl_dev), slice(loss_dev), lambda,
                 WRM_NNUE2SCORE, WRM_IN_SCALING, WRM_IN_OFFSET, WRM_TARGET_OFFSET, WRM_TARGET_SCALING,
                 pow_exp, qp, w1, w2, slice(sum_w_dev), 1_u32, b as u32
@@ -3393,6 +3406,7 @@ fn loss_wrm_default_multiblock_matches_cpu() -> Result<(), Box<dyn std::error::E
     let out_dev = DeviceBuffer::from_host(&stream, &out)?;
     let score_dev = DeviceBuffer::from_host(&stream, &score)?;
     let wdl_dev = DeviceBuffer::from_host(&stream, &wdl)?;
+    let importance_dev = DeviceBuffer::from_host(&stream, &vec![1.0_f32; b])?;
     let mut dl_dev = DeviceBuffer::<f32>::zeroed(&stream, b)?;
     let loss_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
     let sum_w_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
@@ -3403,6 +3417,7 @@ fn loss_wrm_default_multiblock_matches_cpu() -> Result<(), Box<dyn std::error::E
             kernel: loss_wrm, stream: stream, module: module, config: cfg_1d(b),
             args: [
                 slice(out_dev), slice(score_dev), slice(wdl_dev), per_pos_norm,
+                slice(importance_dev),
                 slice_mut(dl_dev), slice(loss_dev), lambda,
                 WRM_NNUE2SCORE, WRM_IN_SCALING, WRM_IN_OFFSET, WRM_TARGET_OFFSET, WRM_TARGET_SCALING,
                 2.0_f32, 0.0_f32, 0.0_f32, 0.5_f32, slice(sum_w_dev), 0_u32, b as u32
@@ -3468,6 +3483,7 @@ fn loss_wrm_extended_multiblock_matches_cpu() -> Result<(), Box<dyn std::error::
     let out_dev = DeviceBuffer::from_host(&stream, &out)?;
     let score_dev = DeviceBuffer::from_host(&stream, &score)?;
     let wdl_dev = DeviceBuffer::from_host(&stream, &wdl)?;
+    let importance_dev = DeviceBuffer::from_host(&stream, &vec![1.0_f32; b])?;
     let mut dl_dev = DeviceBuffer::<f32>::zeroed(&stream, b)?;
     let loss_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
     let sum_w_dev = DeviceBuffer::<f64>::zeroed(&stream, 1)?;
@@ -3477,7 +3493,7 @@ fn loss_wrm_extended_multiblock_matches_cpu() -> Result<(), Box<dyn std::error::
         cuda_launch! {
             kernel: wrm_weight_sum, stream: stream, module: module, config: cfg_1d(b),
             args: [
-                slice(score_dev), slice(sum_w_dev), w1, w2,
+                slice(score_dev), slice(importance_dev), slice(sum_w_dev), w1, w2,
                 WRM_TARGET_OFFSET, WRM_TARGET_SCALING, b as u32
             ]
         }
@@ -3489,6 +3505,7 @@ fn loss_wrm_extended_multiblock_matches_cpu() -> Result<(), Box<dyn std::error::
             kernel: loss_wrm, stream: stream, module: module, config: cfg_1d(b),
             args: [
                 slice(out_dev), slice(score_dev), slice(wdl_dev), per_pos_norm,
+                slice(importance_dev),
                 slice_mut(dl_dev), slice(loss_dev), lambda,
                 WRM_NNUE2SCORE, WRM_IN_SCALING, WRM_IN_OFFSET, WRM_TARGET_OFFSET, WRM_TARGET_SCALING,
                 pow_exp, qp, w1, w2, slice(sum_w_dev), 1_u32, b as u32

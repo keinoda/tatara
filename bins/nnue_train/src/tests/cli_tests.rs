@@ -367,6 +367,43 @@ fn monitor_fp16_clamps_flag_defaults_off_and_parses_global() {
 }
 
 #[test]
+fn prune_options_parse_global_and_preserve_band_boundaries() {
+    let defaults =
+        Cli::try_parse_from(["nnue-train", "layerstack"]).expect("layerstack subcommand");
+    assert!(defaults.prune_bands.is_none());
+    assert_eq!(defaults.prune_beta, 0.0);
+    assert_eq!(defaults.prune_seed, 0);
+
+    let cli = Cli::try_parse_from([
+        "nnue-train",
+        "--prune-bands",
+        "1500:1.0,3000:0.3,inf:0.1",
+        "--prune-beta",
+        "0.5",
+        "--prune-seed",
+        "42",
+        "layerstack",
+    ])
+    .expect("prune options should parse");
+    assert_eq!(
+        cli.prune_bands.expect("prune bands").to_string(),
+        "1500:1,3000:0.3,inf:0.1"
+    );
+    assert_eq!(cli.prune_beta, 0.5);
+    assert_eq!(cli.prune_seed, 42);
+
+    assert!(
+        Cli::try_parse_from([
+            "nnue-train",
+            "--prune-bands",
+            "1500:1.0,3000:0.3",
+            "layerstack"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn monitor_active_features_flag_defaults_off_and_parses_global() {
     // default は false (新規 opt-in flag、実 active feature 数 histogram の log を gate)。
     let cli =

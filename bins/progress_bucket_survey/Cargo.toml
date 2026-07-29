@@ -16,6 +16,7 @@ name = "progress-bucket-survey"
 path = "src/main.rs"
 
 [dependencies]
+nnue-train = { workspace = true }
 shogi-format = { workspace = true }
 shogi-features = { workspace = true }
 clap = { workspace = true }

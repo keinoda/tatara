@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+use nnue_train::dataloader::{PruneBands, PruneConfig};
 use serde::Serialize;
 use shogi_features::ShogiProgressKPAbs;
 use shogi_features::progress_kpabs::SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS;
@@ -98,6 +99,18 @@ struct Args {
     /// Diagnostic saturation threshold p<=eps or p>=1-eps.
     #[arg(long, default_value_t = 1.0e-6)]
     saturation_epsilon: f64,
+
+    /// 評価値依存の保持帯。random surveyで学習時の間引き後分布を再現する。
+    #[arg(long)]
+    prune_bands: Option<PruneBands>,
+
+    /// 間引き判定へ渡すseed。
+    #[arg(long, default_value_t = 0)]
+    prune_seed: u64,
+
+    /// 間引き判定へ渡すepoch。
+    #[arg(long, default_value_t = 0)]
+    prune_epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -291,6 +304,9 @@ struct SurveyReport {
     data_files: Vec<DataFileInfo>,
     sample_plan: PathBuf,
     splits: BTreeMap<String, usize>,
+    prune_bands: Option<String>,
+    prune_seed: Option<u64>,
+    prune_epoch: Option<u64>,
     candidates: Vec<CandidateReport>,
     affine_optimization: Option<AffineOptimizationReport>,
     automatic_adoption: bool,
@@ -1018,6 +1034,11 @@ fn run_random_survey(
 
     let baseline_weights = load_progress_weights(&args.progress)?;
     let mut candidates = parse_candidates(&args.candidates, &baseline_weights)?;
+    let prune = args
+        .prune_bands
+        .clone()
+        .map(|bands| PruneConfig::new(bands, 0.0, args.prune_seed))
+        .transpose()?;
     let mut current_file_index = usize::MAX;
     let mut current_file: Option<File> = None;
     let mut active_indices = Vec::with_capacity(EXPECTED_ACTIVE_INDICES);
@@ -1037,6 +1058,13 @@ fn run_random_survey(
         file.seek(SeekFrom::Start(local_index * PSV_RECORD_BYTES))?;
         let mut psv = PackedSfenValue::default();
         file.read_exact(psv.as_bytes_mut())?;
+        if prune.as_ref().is_some_and(|config| {
+            !config
+                .sample(psv.score(), sample.global_index, args.prune_epoch)
+                .0
+        }) {
+            continue;
+        }
         ShogiProgressKPAbs::collect_active_indices(&psv, &mut active_indices);
         if active_indices.len() != EXPECTED_ACTIVE_INDICES {
             return Err(format!(
@@ -1237,6 +1265,9 @@ fn run_random_survey(
             .iter()
             .map(|split| (split.name.clone(), split.count))
             .collect(),
+        prune_bands: args.prune_bands.as_ref().map(ToString::to_string),
+        prune_seed: args.prune_bands.as_ref().map(|_| args.prune_seed),
+        prune_epoch: args.prune_bands.as_ref().map(|_| args.prune_epoch),
         candidates: candidate_reports,
         affine_optimization,
         automatic_adoption: false,
@@ -1343,6 +1374,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     } else if args.optimizer_target_percentages.is_some() {
         return Err("--optimizer-target-percentages requires --optimize-affine".into());
     }
+    if args.prune_bands.is_none() && (args.prune_seed != 0 || args.prune_epoch != 0) {
+        return Err("--prune-seed/--prune-epoch require --prune-bands".into());
+    }
     let paths = parse_data_paths(&args.data)?;
     if let Some(output_dir) = &args.output_dir {
         run_random_survey(&args, &paths, output_dir)
@@ -1352,8 +1386,9 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             || !args.candidates.is_empty()
             || args.optimize_affine
             || args.optimizer_target_percentages.is_some()
+            || args.prune_bands.is_some()
         {
-            return Err("--seed/--split/--candidate/--optimize-affine/--optimizer-target-percentages require --output-dir".into());
+            return Err("--seed/--split/--candidate/--optimize-affine/--optimizer-target-percentages/--prune-bands require --output-dir".into());
         }
         run_legacy(&args, &paths)
     }
@@ -1594,6 +1629,9 @@ mod tests {
             optimizer_grid_points: 33,
             optimizer_refinements: 2,
             saturation_epsilon: 1.0e-6,
+            prune_bands: Some("inf:1.0".parse().expect("prune bands")),
+            prune_seed: 7,
+            prune_epoch: 3,
         };
 
         run_random_survey(&args, &[data], &output).expect("one-pass optimized survey");
@@ -1602,6 +1640,9 @@ mod tests {
                 .expect("metrics JSON");
         assert_eq!(report["schema_version"], 2);
         assert_eq!(report["automatic_adoption"], false);
+        assert_eq!(report["prune_bands"], "inf:1");
+        assert_eq!(report["prune_seed"], 7);
+        assert_eq!(report["prune_epoch"], 3);
         assert_eq!(report["affine_optimization"]["teacher_data_passes"], 1);
         assert_eq!(
             report["affine_optimization"]["target_percentages"],

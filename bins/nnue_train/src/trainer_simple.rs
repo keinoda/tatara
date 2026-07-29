@@ -117,6 +117,8 @@ pub(crate) struct SimpleGpuWorkspace {
     score_dev: DeviceBuffer<f32>,
     /// target wdl (`b`、0.0/0.5/1.0)。
     wdl_dev: DeviceBuffer<f32>,
+    /// position ごとの importance weight。
+    importance_dev: DeviceBuffer<f32>,
     /// 同上、back 側物理 buffer。次 step の H2D 先 (`step` 冒頭で `mem::swap` で active
     /// へ昇格)。直前 step の compute が読んでいる active と物理分離されるため、H2D は
     /// 直前 step の compute と並走しても buffer 競合が起きない。
@@ -125,6 +127,7 @@ pub(crate) struct SimpleGpuWorkspace {
     nnz_dev_back: DeviceBuffer<i32>,
     score_dev_back: DeviceBuffer<f32>,
     wdl_dev_back: DeviceBuffer<f32>,
+    importance_dev_back: DeviceBuffer<f32>,
 }
 
 impl SimpleGpuWorkspace {
@@ -184,11 +187,13 @@ impl SimpleGpuWorkspace {
             nnz_dev: DeviceBuffer::<i32>::zeroed(stream, batch)?,
             score_dev: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             wdl_dev: DeviceBuffer::<f32>::zeroed(stream, batch)?,
+            importance_dev: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             stm_idx_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch * max_active)?,
             nstm_idx_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch * max_active)?,
             nnz_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch)?,
             score_dev_back: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             wdl_dev_back: DeviceBuffer::<f32>::zeroed(stream, batch)?,
+            importance_dev_back: DeviceBuffer::<f32>::zeroed(stream, batch)?,
         })
     }
 
@@ -770,6 +775,10 @@ impl SimpleGpuTrainer {
         std::mem::swap(&mut self.ws.nnz_dev, &mut self.ws.nnz_dev_back);
         std::mem::swap(&mut self.ws.score_dev, &mut self.ws.score_dev_back);
         std::mem::swap(&mut self.ws.wdl_dev, &mut self.ws.wdl_dev_back);
+        std::mem::swap(
+            &mut self.ws.importance_dev,
+            &mut self.ws.importance_dev_back,
+        );
         self.input_ring.upload_simple(
             &self.stream,
             &self.ws.stm_idx_dev,
@@ -782,6 +791,8 @@ impl SimpleGpuTrainer {
             &batch.score[..b],
             &self.ws.wdl_dev,
             &batch.wdl[..b],
+            &self.ws.importance_dev,
+            &batch.importance_weight[..b],
         )?;
 
         self.run_forward_kernels(batch, wdl_lambda, loss, true)?;
@@ -911,6 +922,11 @@ impl SimpleGpuTrainer {
             copy_host_to_device_async_i32(&self.stream, &self.ws.nnz_dev, &batch.nnz[..b])?;
             copy_host_to_device_async_f32(&self.stream, &self.ws.score_dev, &batch.score[..b])?;
             copy_host_to_device_async_f32(&self.stream, &self.ws.wdl_dev, &batch.wdl[..b])?;
+            copy_host_to_device_async_f32(
+                &self.stream,
+                &self.ws.importance_dev,
+                &batch.importance_weight[..b],
+            )?;
         }
 
         // -- loss_acc / weight_sum_acc を 0 にリセット (再 alloc 無し) --
@@ -1452,7 +1468,7 @@ impl SimpleGpuTrainer {
                 // extended (nnue-pytorch 一般化) loss は Σw 正規化を要するので、先に
                 // wrm_weight_sum で Σw を確定させる。既定の拡張パラメータでは二乗誤差に
                 // 帰着し weight_sum を launch せず bit-identical 経路を通す。
-                let extended = loss.wrm_extended();
+                let extended = loss.wrm_extended() || batch.importance_enabled;
                 if extended {
                     unsafe {
                         // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
@@ -1464,6 +1480,7 @@ impl SimpleGpuTrainer {
                             config: cfg_1d(b),
                             args: [
                                 slice(self.ws.score_dev),
+                                slice(self.ws.importance_dev),
                                 slice(self.weight_sum_acc),
                                 weight_boost_w1, weight_boost_w2,
                                 target_offset, target_scaling, b_u32
@@ -1484,6 +1501,7 @@ impl SimpleGpuTrainer {
                             slice(self.ws.score_dev),
                             slice(self.ws.wdl_dev),
                             batch.per_pos_norm,
+                            slice(self.ws.importance_dev),
                             slice_mut(self.ws.dy_net_output),
                             slice(self.loss_acc),
                             wdl_lambda,

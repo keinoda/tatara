@@ -424,12 +424,14 @@ pub(crate) struct GpuWorkspace {
     bucket_idx_dev: DeviceBuffer<i32>,      // batch
     score_dev: DeviceBuffer<f32>,           // batch
     wdl_dev: DeviceBuffer<f32>,             // batch
+    importance_dev: DeviceBuffer<f32>,      // batch
     stm_idx_dev_back: DeviceBuffer<i32>,    // batch * max_active
     nstm_idx_dev_back: DeviceBuffer<i32>,   // batch * max_active
     nnz_dev_back: DeviceBuffer<i32>,        // batch
     bucket_idx_dev_back: DeviceBuffer<i32>, // batch
     score_dev_back: DeviceBuffer<f32>,      // batch
     wdl_dev_back: DeviceBuffer<f32>,        // batch
+    importance_dev_back: DeviceBuffer<f32>, // batch
 
     // -- bucket sort scratch (fwd_L1 用 sorted layout 切換) --
     bucket_counts_dev: DeviceBuffer<u32>, // num_buckets + 1 (histogram + invalid bin)
@@ -541,12 +543,14 @@ impl GpuWorkspace {
             bucket_idx_dev: DeviceBuffer::<i32>::zeroed(stream, batch)?,
             score_dev: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             wdl_dev: DeviceBuffer::<f32>::zeroed(stream, batch)?,
+            importance_dev: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             stm_idx_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch * max_active)?,
             nstm_idx_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch * max_active)?,
             nnz_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch)?,
             bucket_idx_dev_back: DeviceBuffer::<i32>::zeroed(stream, batch)?,
             score_dev_back: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             wdl_dev_back: DeviceBuffer::<f32>::zeroed(stream, batch)?,
+            importance_dev_back: DeviceBuffer::<f32>::zeroed(stream, batch)?,
             bucket_counts_dev: DeviceBuffer::<u32>::zeroed(stream, num_buckets + 1)?,
             bucket_offsets_dev: DeviceBuffer::<u32>::zeroed(stream, num_buckets + 1)?,
             bucket_write_ctr_dev: DeviceBuffer::<u32>::zeroed(stream, num_buckets + 1)?,
@@ -1822,7 +1826,7 @@ impl GpuTrainer {
             };
         }
 
-        // 入力 5 buffer を host → device。active / back buffer を `mem::swap` してから
+        // 入力 7 buffer を host → device。active / back buffer を `mem::swap` してから
         // back 側 (= 直前 step が読んでいない物理 buffer) へ専用 copy stream で先行 H2D
         // する。H2D は直前 step の compute と並走し、compute stream は H2D 完了 event を
         // 待ってから forward に進む ([`InputUploadRing`])。pageable な dataloader `Vec`
@@ -1836,6 +1840,10 @@ impl GpuTrainer {
         );
         std::mem::swap(&mut self.ws.score_dev, &mut self.ws.score_dev_back);
         std::mem::swap(&mut self.ws.wdl_dev, &mut self.ws.wdl_dev_back);
+        std::mem::swap(
+            &mut self.ws.importance_dev,
+            &mut self.ws.importance_dev_back,
+        );
         self.input_ring.upload(
             &self.stream,
             &self.ws.stm_idx_dev,
@@ -1850,6 +1858,8 @@ impl GpuTrainer {
             batch.score,
             &self.ws.wdl_dev,
             batch.wdl,
+            &self.ws.importance_dev,
+            batch.importance_weight,
         )?;
         // per_pos_norm は scalar (1/n_pos) として直接 kernel arg に渡す。
 
@@ -2518,7 +2528,7 @@ impl GpuTrainer {
                 // extended (nnue-pytorch 一般化) loss は Σw 正規化を要するので、先に
                 // wrm_weight_sum で Σw を確定させる。既定の拡張パラメータでは二乗誤差に
                 // 帰着し weight_sum を launch せず bit-identical 経路を通す。
-                let extended = loss.wrm_extended();
+                let extended = loss.wrm_extended() || batch.importance_enabled;
                 if extended {
                     unsafe {
                         // SAFETY: kernel signature と args の個数・順序・型は一致し、渡す buffer は
@@ -2530,6 +2540,7 @@ impl GpuTrainer {
                             config: cfg_1d(b),
                             args: [
                                 slice(self.ws.score_dev),
+                                slice(self.ws.importance_dev),
                                 slice(self.weight_sum_acc),
                                 weight_boost_w1, weight_boost_w2,
                                 target_offset, target_scaling, b_u32
@@ -2550,6 +2561,7 @@ impl GpuTrainer {
                             slice(self.ws.score_dev),
                             slice(self.ws.wdl_dev),
                             batch.per_pos_norm,
+                            slice(self.ws.importance_dev),
                             slice_mut(self.ws.dy_net_output),
                             slice(self.loss_acc),
                             wdl_lambda, nnue2score, in_scaling, in_offset,

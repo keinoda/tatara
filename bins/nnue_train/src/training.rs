@@ -8,7 +8,7 @@ use nnue_format::LayerStackWeights;
 #[cfg(feature = "gpu")]
 use nnue_format::{SimpleActivation, SimpleId, SimpleWeights};
 #[cfg(any(feature = "gpu", test))]
-use nnue_train::dataloader::BucketMode;
+use nnue_train::dataloader::{BucketMode, PruneConfig};
 #[cfg(feature = "gpu")]
 use nnue_train::experiment::{DataInfo, ExperimentDoc, ExperimentLogger, Lineage, Params};
 #[cfg(feature = "gpu")]
@@ -289,6 +289,16 @@ fn validate_shared_cli(
             "--keep-checkpoints must be >= 1 when set (0 would delete every raw checkpoint)".into(),
         );
     }
+    if !cli.prune_beta.is_finite() || !(0.0..=1.0).contains(&cli.prune_beta) {
+        return Err(format!(
+            "--prune-beta must be finite and in [0, 1] (got {})",
+            cli.prune_beta
+        )
+        .into());
+    }
+    if cli.prune_bands.is_none() && (cli.prune_beta != 0.0 || cli.prune_seed != 0) {
+        return Err("--prune-beta / --prune-seed require --prune-bands".into());
+    }
 
     Ok(SharedCliValidation {
         feature_set,
@@ -300,6 +310,17 @@ fn validate_shared_cli(
             tf32: tf32_raw || cli.all_optim,
         },
     })
+}
+
+#[cfg(feature = "gpu")]
+fn build_prune_config(cli: &Cli) -> Result<Option<PruneConfig>, Box<dyn std::error::Error>> {
+    cli.prune_bands
+        .clone()
+        .map(|bands| {
+            PruneConfig::new(bands, cli.prune_beta, cli.prune_seed)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+        })
+        .transpose()
 }
 
 #[cfg(feature = "gpu")]
@@ -743,6 +764,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
 
     let lr_scheduler = build_lr_scheduler(cli, resumed_lr_horizon)?;
     let wdl_scheduler = build_wdl_scheduler(cli)?;
+    let prune_config = build_prune_config(cli)?;
     let cfg = TrainingConfig {
         net_id: cli.net_id.clone(),
         feature_set,
@@ -758,6 +780,7 @@ pub(crate) fn run_training(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> 
         loss,
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs,
+        prune_config,
         threads: cli.threads,
         test_data: cli.test_data.clone(),
         test_positions: cli.test_positions,
@@ -1504,6 +1527,12 @@ pub(crate) fn build_experiment_logger(
         wrm_weight_boost_w2: is_wrm.then(|| finite_or_zero(cli.loss_weight_boost_w2)),
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs.map(i32::from),
+        prune_bands: cli.prune_bands.as_ref().map(ToString::to_string),
+        prune_beta: cli
+            .prune_bands
+            .as_ref()
+            .map(|_| finite_or_zero(cli.prune_beta)),
+        prune_seed: cli.prune_bands.as_ref().map(|_| cli.prune_seed),
         init_from: cli.init_from.as_deref().map(file_basename),
         init_preset: init_summary_for_log(cli),
         // test_data / test_positions / test_tail_positions は対応する CLI フラグ
@@ -1667,6 +1696,12 @@ pub(crate) fn build_experiment_logger_simple(
         wrm_weight_boost_w2: is_wrm.then(|| finite_or_zero(cli.loss_weight_boost_w2)),
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs.map(i32::from),
+        prune_bands: cli.prune_bands.as_ref().map(ToString::to_string),
+        prune_beta: cli
+            .prune_bands
+            .as_ref()
+            .map(|_| finite_or_zero(cli.prune_beta)),
+        prune_seed: cli.prune_bands.as_ref().map(|_| cli.prune_seed),
         init_from: cli.init_from.as_deref().map(file_basename),
         init_preset: init_summary_for_log(cli),
         test_data: cli.test_data.as_deref().map(file_basename),
@@ -1966,6 +2001,7 @@ pub(crate) fn run_simple_training(
 
     let lr_scheduler = build_lr_scheduler(cli, resumed_lr_horizon)?;
     let wdl_scheduler = build_wdl_scheduler(cli)?;
+    let prune_config = build_prune_config(cli)?;
     let cfg = TrainingConfig {
         net_id: cli.net_id.clone(),
         feature_set,
@@ -1981,6 +2017,7 @@ pub(crate) fn run_simple_training(
         loss,
         score_drop_abs: cli.score_drop_abs,
         score_clamp_abs: cli.score_clamp_abs,
+        prune_config,
         threads: cli.threads,
         test_data: cli.test_data.clone(),
         test_positions: cli.test_positions,
