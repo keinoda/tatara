@@ -18,6 +18,41 @@ pub const YANEURAOU_LAYER_STACKS: usize = 9;
 const MAX_FT_OUT: usize = 8192;
 const MAX_HIDDEN_DIM: usize = 4096;
 
+/// YaneuraOuへ書き出すi8 weightの量子化端点統計。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct I8QuantisationStats {
+    pub total: usize,
+    pub positive_127: usize,
+    pub negative_127: usize,
+    pub negative_128: usize,
+}
+
+impl I8QuantisationStats {
+    pub fn pinned_pm127(&self) -> usize {
+        self.positive_127 + self.negative_127
+    }
+
+    pub fn pinned_pm127_percent(&self) -> f64 {
+        percent(self.pinned_pm127(), self.total)
+    }
+
+    pub fn saturated_abs_ge127(&self) -> usize {
+        self.pinned_pm127() + self.negative_128
+    }
+
+    pub fn saturated_abs_ge127_percent(&self) -> f64 {
+        percent(self.saturated_abs_ge127(), self.total)
+    }
+}
+
+/// YaneuraOuへ書き出すdense i8 weightの層別量子化端点統計。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YaneuraouI8SaturationReport {
+    pub l1: I8QuantisationStats,
+    pub l2: I8QuantisationStats,
+    pub l3: I8QuantisationStats,
+}
+
 struct YoFeature {
     feature_set: FeatureSet,
     yo_name: &'static str,
@@ -111,6 +146,43 @@ pub fn save_yaneuraou<W: Write>(writer: &mut W, weights: &LayerStackWeights) -> 
         )?;
     }
     Ok(())
+}
+
+/// 最終YaneuraOu出力と同じL1 factorizer加算・i8量子化を用いて端点率を数える。
+///
+/// SIMD用のzero paddingは学習weightではないため分母に含めない。FTはi16出力なので
+/// 対象外とする。
+pub fn yaneuraou_i8_saturation_report(
+    weights: &LayerStackWeights,
+) -> io::Result<YaneuraouI8SaturationReport> {
+    let arch = architecture(weights)?;
+    validate_weights(&arch, weights)?;
+
+    let ft_out = arch.ft_out;
+    let l1_out = arch.l1_out;
+    let l2_out = arch.l2_out;
+    let l2_in = (l1_out - 1) * 2;
+
+    let l1 = quantisation_stats((0..YANEURAOU_LAYER_STACKS).flat_map(|bucket| {
+        (0..l1_out).flat_map(move |output| {
+            (0..ft_out).map(move |input| {
+                weights.l1_w[bucket * l1_out * ft_out + output * ft_out + input]
+                    + weights.l1f_w[input * l1_out + output]
+            })
+        })
+    }));
+    let l2 = quantisation_stats((0..YANEURAOU_LAYER_STACKS).flat_map(|bucket| {
+        (0..l2_out).flat_map(move |output| {
+            (0..l2_in)
+                .map(move |input| weights.l2_w[bucket * l2_out * l2_in + output * l2_in + input])
+        })
+    }));
+    let l3 =
+        quantisation_stats((0..YANEURAOU_LAYER_STACKS).flat_map(|bucket| {
+            (0..l2_out).map(move |input| weights.l3_w[bucket * l2_out + input])
+        }));
+
+    Ok(YaneuraouI8SaturationReport { l1, l2, l3 })
 }
 
 #[derive(Debug)]
@@ -294,6 +366,33 @@ fn quantize_i8(value: f32, scale: f64) -> i8 {
         .clamp(i8::MIN as f64, i8::MAX as f64) as i8
 }
 
+fn quantisation_stats(values: impl IntoIterator<Item = f32>) -> I8QuantisationStats {
+    let mut stats = I8QuantisationStats {
+        total: 0,
+        positive_127: 0,
+        negative_127: 0,
+        negative_128: 0,
+    };
+    for value in values {
+        stats.total += 1;
+        match quantize_i8(value, QB as f64) {
+            127 => stats.positive_127 += 1,
+            -127 => stats.negative_127 += 1,
+            -128 => stats.negative_128 += 1,
+            _ => {}
+        }
+    }
+    stats
+}
+
+fn percent(count: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        count as f64 / total as f64 * 100.0
+    }
+}
+
 fn write_u32<W: Write>(writer: &mut W, value: u32) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
@@ -447,5 +546,43 @@ mod tests {
         assert!(output[11..40].iter().all(|&byte| byte == 0));
         assert_eq!(&output[40..43], &[255, 254, 253]);
         assert!(output[43..72].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn saturation_report_uses_merged_l1_and_export_quantisation() {
+        let mut weights = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            128,
+            2,
+            1,
+            YANEURAOU_LAYER_STACKS,
+        );
+        weights.l1_w[0] = 126.0 / QB as f32;
+        weights.l1f_w[0] = 1.0 / QB as f32;
+        weights.l1_w[1] = -126.0 / QB as f32;
+        weights.l1f_w[2] = -1.0 / QB as f32;
+        weights.l1_w[2] = -127.0 / QB as f32;
+        weights.l1f_w[4] = -1.0 / QB as f32;
+
+        weights.l2_w[0] = 127.0 / QB as f32;
+        weights.l2_w[1] = -127.0 / QB as f32;
+        weights.l2_w[2] = -128.0 / QB as f32;
+        weights.l3_w[0] = 127.0 / QB as f32;
+        weights.l3_w[1] = -127.0 / QB as f32;
+        weights.l3_w[2] = -128.0 / QB as f32;
+
+        let report = yaneuraou_i8_saturation_report(&weights).unwrap();
+        assert_eq!(report.l1.total, YANEURAOU_LAYER_STACKS * 2 * 128);
+        assert_eq!(report.l1.positive_127, 1);
+        assert_eq!(report.l1.negative_127, 1);
+        assert_eq!(report.l1.negative_128, 1);
+        assert_eq!(report.l2.total, YANEURAOU_LAYER_STACKS * 2);
+        assert_eq!(report.l2.positive_127, 1);
+        assert_eq!(report.l2.negative_127, 1);
+        assert_eq!(report.l2.negative_128, 1);
+        assert_eq!(report.l3.total, YANEURAOU_LAYER_STACKS);
+        assert_eq!(report.l3.positive_127, 1);
+        assert_eq!(report.l3.negative_127, 1);
+        assert_eq!(report.l3.negative_128, 1);
     }
 }
