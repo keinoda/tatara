@@ -8,7 +8,7 @@ for command_name in mkdir python3 sha256sum stat; do
   require_command "$command_name"
 done
 [[ -x "$PROGRESS_SURVEY" ]] || fail "progress-bucket-surveyがありません: $PROGRESS_SURVEY"
-[[ -f "$MANIFEST_DIR/prepared-data.txt" ]] || fail "教師分割manifestがありません"
+[[ -f "$PREPARED_DATA_MANIFEST" ]] || fail "適格教師manifestがありません"
 [[ -f "$ORDINARY_PSV" ]] || fail "非相入玉教師がありません: $ORDINARY_PSV"
 [[ -f "$BASELINE_PROGRESS" ]] || fail "基準progress.binがありません: $BASELINE_PROGRESS"
 [[ "$(file_size "$BASELINE_PROGRESS")" == "$PROGRESS_EXPECTED_BYTES" ]] \
@@ -17,15 +17,15 @@ actual_baseline_sha=$(sha256_file "$BASELINE_PROGRESS")
 [[ "$actual_baseline_sha" == "$BASELINE_PROGRESS_SHA256" ]] \
   || fail "基準progress.binのSHA-256が不一致です: actual=$actual_baseline_sha expected=$BASELINE_PROGRESS_SHA256"
 
-readonly SURVEY_ID="wcsc36-ordinary-affine"
+readonly SURVEY_ID="wcsc36-ordinary-valid76-affine"
 readonly SURVEY_DIR="$EXPERIMENT_ROOT/survey/$SURVEY_ID"
-readonly OPTIMIZED_CANDIDATE="optimized-wcsc36-ordinary-center"
+readonly OPTIMIZED_CANDIDATE="optimized-wcsc36-ordinary-valid76-center"
 readonly TARGET_PERCENTAGES="11,12,13,14,14,13,12,11"
 readonly SURVEY_SEED=20260726
 [[ ! -e "$SURVEY_DIR" ]] || fail "既存surveyを上書きしません: $SURVEY_DIR"
 
-expected_ordinary_bytes=$(manifest_value "$MANIFEST_DIR/prepared-data.txt" ordinary_bytes)
-expected_ordinary_sha=$(manifest_value "$MANIFEST_DIR/prepared-data.txt" ordinary_sha256)
+expected_ordinary_bytes=$(manifest_value "$PREPARED_DATA_MANIFEST" ordinary_bytes)
+expected_ordinary_sha=$(manifest_value "$PREPARED_DATA_MANIFEST" ordinary_sha256)
 [[ "$(file_size "$ORDINARY_PSV")" == "$expected_ordinary_bytes" ]] \
   || fail "ordinary.psvのsizeが分割manifestと異なります"
 [[ "$(sha256_file "$ORDINARY_PSV")" == "$expected_ordinary_sha" ]] \

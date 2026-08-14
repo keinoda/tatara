@@ -39,7 +39,7 @@ exec > >(tee -a "$ONSTART_LOG") 2>&1
 echo "===== onstart $(date -u +%FT%TZ) ====="
 
 for command_name in \
-  awk bash chmod chown cmp cut date df git grep head lscpu mkdir mv nproc \
+  awk bash chmod chown cmp cut date dd df git grep head lscpu mkdir mv nproc \
   nvidia-smi rm rustc service sha256sum tee tmux touch; do
   require_command "$command_name"
 done
@@ -211,8 +211,10 @@ target/release/nnue-train layerstack --help | grep -F 'progress8ek'
 target/release/net_to_yo --help | grep -F 'assume-progress8ek'
 target/release/progress8ek-filter --help >/dev/null
 target/release/progress8ek-partition --help >/dev/null
+target/release/progress8ek-audit-psv --help >/dev/null
 sha256sum "$kernel_dir/nnue_train.ll" "$kernel_dir/nnue_train.ptx" target/release/nnue-train \
-  target/release/net_to_yo target/release/progress8ek-filter target/release/progress8ek-partition
+  target/release/net_to_yo target/release/progress8ek-filter target/release/progress8ek-partition \
+  target/release/progress8ek-audit-psv
 JOB
 start_job build_tatara "$build_tatara_body"
 

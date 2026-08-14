@@ -12,8 +12,8 @@ done
   || fail "教師shardの全SHA-256検証markerがありません: $SOURCE_VALIDATION_MARKER"
 [[ ! -e "$TRAINING_DATA_DIR" ]] \
   || fail "既存の教師出力を上書きしません: $TRAINING_DATA_DIR"
-[[ ! -e "$MANIFEST_DIR/prepared-data.txt" ]] \
-  || fail "既存の教師分割manifestを上書きしません: $MANIFEST_DIR/prepared-data.txt"
+[[ ! -e "$PARTITION_DATA_MANIFEST" ]] \
+  || fail "既存の教師分割manifestを上書きしません: $PARTITION_DATA_MANIFEST"
 
 data_args=()
 source_bytes=0
@@ -59,7 +59,7 @@ printf ' %q' "$PARTITION_BIN" "${data_args[@]}" --output-dir "$TRAINING_DATA_DIR
 printf '\n'
 "$PARTITION_BIN" "${data_args[@]}" --output-dir "$TRAINING_DATA_DIR" --threads 16
 
-[[ -f "$ORDINARY_PSV" && -f "$ENTERING_KING_PSV" && -f "$PARTITION_METRICS" ]] \
+[[ -f "$PARTITION_ORDINARY_PSV" && -f "$ENTERING_KING_PSV" && -f "$PARTITION_METRICS" ]] \
   || fail "分割後の2ファイルまたはmetricsが不足しています"
 read -r scanned ordinary_records entering_king_records verified_ordinary verified_entering_king < <(
   python3 - "$PARTITION_METRICS" <<'PY'
@@ -83,12 +83,12 @@ PY
 (( verified_ordinary == ordinary_records && verified_entering_king == entering_king_records )) \
   || fail "出力PSVの全件述語検査が完了していません"
 
-ordinary_bytes=$(file_size "$ORDINARY_PSV")
+ordinary_bytes=$(file_size "$PARTITION_ORDINARY_PSV")
 entering_king_bytes=$(file_size "$ENTERING_KING_PSV")
 (( ordinary_bytes == ordinary_records * PSV_RECORD_BYTES )) || fail "ordinary.psvのsizeが不一致です"
 (( entering_king_bytes == entering_king_records * PSV_RECORD_BYTES )) \
   || fail "entering-king.psvのsizeが不一致です"
-ordinary_sha=$(sha256_file "$ORDINARY_PSV")
+ordinary_sha=$(sha256_file "$PARTITION_ORDINARY_PSV")
 entering_king_sha=$(sha256_file "$ENTERING_KING_PSV")
 metrics_sha=$(sha256_file "$PARTITION_METRICS")
 
@@ -100,7 +100,7 @@ metrics_sha=$(sha256_file "$PARTITION_METRICS")
   printf 'source_bytes=%s\n' "$source_bytes"
   printf 'source_records=%s\n' "$source_records"
   printf 'predicate=black_rank_one_based<=5_and_white_rank_one_based>=5\n'
-  printf 'ordinary_psv=%s\n' "$ORDINARY_PSV"
+  printf 'ordinary_psv=%s\n' "$PARTITION_ORDINARY_PSV"
   printf 'ordinary_records=%s\n' "$ordinary_records"
   printf 'ordinary_bytes=%s\n' "$ordinary_bytes"
   printf 'ordinary_sha256=%s\n' "$ordinary_sha"
@@ -112,6 +112,6 @@ metrics_sha=$(sha256_file "$PARTITION_METRICS")
   printf 'partition_metrics_sha256=%s\n' "$metrics_sha"
   printf 'predicate_verification=all_records\n'
   printf 'input_order_preserved=true\n'
-} | write_manifest_atomic "$MANIFEST_DIR/prepared-data.txt"
+} | write_manifest_atomic "$PARTITION_DATA_MANIFEST"
 
 echo "[teacher-partition] 2ファイルへの排他的全件分割とSHA-256記録が完了しました"

@@ -87,6 +87,7 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         subprocess.run(["bash", "-n", str(REPO_ROOT / "onstart.sh")], check=True)
         self.assertIn("-p progress8ek-filter", onstart)
         self.assertIn("progress8ek-partition --help", onstart)
+        self.assertIn("progress8ek-audit-psv --help", onstart)
         self.assertIn("progress8ek_finetune_updates_only_slot8", onstart)
         self.assertIn("dataset_download=deferred", onstart)
         self.assertNotIn("hf download", onstart)
@@ -99,11 +100,26 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
             ["bash", "-n", str(SCRIPT_DIR / "run-teacher-partition.sh")], check=True
         )
         self.assertIn('"$PARTITION_BIN"', script)
+        self.assertIn('"$PARTITION_ORDINARY_PSV"', script)
         self.assertIn('ordinary_psv=%s', script)
         self.assertIn('entering_king_psv=%s', script)
         self.assertIn('predicate_verification=all_records', script)
         self.assertIn('--threads 16', script)
         self.assertNotIn('holdout', script)
+
+    def test_invalid_ordinary_removal_requires_exhaustive_active_audits(self) -> None:
+        script_path = SCRIPT_DIR / "run-remove-invalid-ordinary.sh"
+        script = script_path.read_text(encoding="utf-8")
+        subprocess.run(["bash", "-n", str(script_path)], check=True)
+        self.assertIn('ordinary["expected_active_indices"] == 76', script)
+        self.assertIn('ordinary["ineligible_records"]', script)
+        self.assertIn('ordinary["zero_records"]', script)
+        self.assertIn('last - first + 1 == removed', script)
+        self.assertIn('entering["ineligible_records"] == 0', script)
+        self.assertIn('iflag=count_bytes', script)
+        self.assertIn('iflag=skip_bytes', script)
+        self.assertIn('full_prefix_and_suffix_cmp', script)
+        self.assertIn('"$PREPARED_DATA_MANIFEST"', script)
 
     def test_progress_adjustment_reuses_previous_affine_protocol(self) -> None:
         script = (SCRIPT_DIR / "run-progress-affine-survey.sh").read_text(
@@ -120,6 +136,8 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         self.assertIn('11,12,13,14,14,13,12,11', script)
         self.assertIn('1.2980837735881936:-0.5975424282106219', script)
         self.assertIn('mkdir -p "$(dirname "$SURVEY_DIR")"', script)
+        self.assertIn('"$PREPARED_DATA_MANIFEST"', script)
+        self.assertIn('wcsc36-ordinary-valid76-affine', script)
         self.assertNotIn('--optimize-scale', script)
 
     def test_browser_settings_reject_remote_commit_mismatch(self) -> None:
