@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
 
-for command_name in python3 sha256sum stat; do
+for command_name in mkdir python3 sha256sum stat; do
   require_command "$command_name"
 done
 [[ -x "$PROGRESS_SURVEY" ]] || fail "progress-bucket-surveyがありません: $PROGRESS_SURVEY"
@@ -30,6 +30,7 @@ expected_ordinary_sha=$(manifest_value "$MANIFEST_DIR/prepared-data.txt" ordinar
   || fail "ordinary.psvのsizeが分割manifestと異なります"
 [[ "$(sha256_file "$ORDINARY_PSV")" == "$expected_ordinary_sha" ]] \
   || fail "ordinary.psvのSHA-256が分割manifestと異なります"
+mkdir -p "$(dirname "$SURVEY_DIR")"
 
 command=(
   "$PROGRESS_SURVEY"

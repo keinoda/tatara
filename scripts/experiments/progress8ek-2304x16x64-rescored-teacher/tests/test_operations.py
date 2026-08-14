@@ -119,6 +119,7 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         self.assertIn('--split final-test:1000000', script)
         self.assertIn('11,12,13,14,14,13,12,11', script)
         self.assertIn('1.2980837735881936:-0.5975424282106219', script)
+        self.assertIn('mkdir -p "$(dirname "$SURVEY_DIR")"', script)
         self.assertNotIn('--optimize-scale', script)
 
     def test_browser_settings_reject_remote_commit_mismatch(self) -> None:
