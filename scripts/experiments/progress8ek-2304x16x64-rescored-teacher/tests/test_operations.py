@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -13,6 +14,33 @@ REPO_ROOT = SCRIPT_DIR.parents[2]
 
 
 class OperationsTests(unittest.TestCase):
+    def test_source_manifest_fixes_wcsc36_shards(self) -> None:
+        manifest = SCRIPT_DIR / "source-shards.tsv"
+        rows = [
+            line.split("\t")
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        self.assertEqual(len(rows), 30)
+        self.assertTrue(all(len(row) == 6 for row in rows))
+
+        source = "penguinkumimanu/Knowledge_distilled_dataset_by_ponkotsuWCSC36"
+        revision = "526bd42a59cdd961ef0c42e6068499625811ffee"
+        expected_filenames = [
+            f"ponkotsu_WCSC36_{index:03d}.bin" for index in range(1, 30)
+        ] + ["dlsuisho_uniqueponkotsu_WCSC36"]
+
+        self.assertEqual([row[2] for row in rows], expected_filenames)
+        self.assertTrue(all(row[0] == source for row in rows))
+        self.assertTrue(all(row[1] == revision for row in rows))
+        self.assertTrue(all(row[5] == "rescored" for row in rows))
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", row[4]) for row in rows))
+
+        sizes = [int(row[3]) for row in rows]
+        self.assertTrue(all(size % 40 == 0 for size in sizes))
+        self.assertEqual(sum(sizes), 586_757_977_480)
+        self.assertEqual(sum(sizes) // 40, 14_668_949_437)
+
     def test_browser_settings_pin_remote_commit_and_omit_dataset_download(self) -> None:
         branch = "codex/progress8ek-rescored-teacher-operations"
         remote = "a" * 40
