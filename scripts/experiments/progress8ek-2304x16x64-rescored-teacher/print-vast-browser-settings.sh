@@ -49,7 +49,7 @@ cat <<SETTINGS
 Vast.ai Web UI settings
 
 Offer:
-1x RTX 5090 / AMD Ryzen 9 9950X / at least 16 allocated CPU threads
+1x RTX 5070 / AMD Ryzen 9 9950X / at least 16 allocated CPU threads
 
 Launch mode:
 SSH / Direct connections enabled
@@ -58,10 +58,10 @@ Image:
 $image_reference
 
 Container disk:
-40 GB
+利用者が指定
 
 Volume:
-任意の容量を /workspace にmount
+利用者が指定。/workspaceの実容量はon-startで記録
 
 Docker Options:
 $docker_options

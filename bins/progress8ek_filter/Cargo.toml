@@ -19,6 +19,10 @@ path = "src/main.rs"
 name = "progress8ek-verify-network"
 path = "src/verify_network.rs"
 
+[[bin]]
+name = "progress8ek-partition"
+path = "src/partition.rs"
+
 [dependencies]
 clap = { workspace = true }
 serde = { version = "1", features = ["derive"] }

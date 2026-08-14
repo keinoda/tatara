@@ -71,8 +71,8 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
 
         bootstrap = generated.split("On-start Script:\n", 1)[1]
         subprocess.run(["bash", "-n", "-c", bootstrap], check=True)
-        self.assertIn("1x RTX 5090 / AMD Ryzen 9 9950X", generated)
-        self.assertIn("任意の容量を /workspace にmount", generated)
+        self.assertIn("1x RTX 5070 / AMD Ryzen 9 9950X", generated)
+        self.assertIn("利用者が指定。/workspaceの実容量はon-startで記録", generated)
         self.assertIn("-p 6001:6001", generated)
         self.assertIn(f'readonly commit="{remote}"', bootstrap)
         self.assertIn("checkout --detach \"$commit\"", bootstrap)
@@ -86,11 +86,40 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         onstart = (REPO_ROOT / "onstart.sh").read_text(encoding="utf-8")
         subprocess.run(["bash", "-n", str(REPO_ROOT / "onstart.sh")], check=True)
         self.assertIn("-p progress8ek-filter", onstart)
+        self.assertIn("progress8ek-partition --help", onstart)
         self.assertIn("progress8ek_finetune_updates_only_slot8", onstart)
         self.assertIn("dataset_download=deferred", onstart)
         self.assertNotIn("hf download", onstart)
         self.assertNotIn("TRAIN_DATASET", onstart)
         self.assertNotIn("download_training", onstart)
+
+    def test_teacher_partition_produces_exactly_two_predicate_outputs(self) -> None:
+        script = (SCRIPT_DIR / "run-teacher-partition.sh").read_text(encoding="utf-8")
+        subprocess.run(
+            ["bash", "-n", str(SCRIPT_DIR / "run-teacher-partition.sh")], check=True
+        )
+        self.assertIn('"$PARTITION_BIN"', script)
+        self.assertIn('ordinary_psv=%s', script)
+        self.assertIn('entering_king_psv=%s', script)
+        self.assertIn('predicate_verification=all_records', script)
+        self.assertIn('--threads 16', script)
+        self.assertNotIn('holdout', script)
+
+    def test_progress_adjustment_reuses_previous_affine_protocol(self) -> None:
+        script = (SCRIPT_DIR / "run-progress-affine-survey.sh").read_text(
+            encoding="utf-8"
+        )
+        subprocess.run(
+            ["bash", "-n", str(SCRIPT_DIR / "run-progress-affine-survey.sh")],
+            check=True,
+        )
+        self.assertIn('--optimize-affine', script)
+        self.assertIn('--split calibration:2000000', script)
+        self.assertIn('--split selection:1000000', script)
+        self.assertIn('--split final-test:1000000', script)
+        self.assertIn('11,12,13,14,14,13,12,11', script)
+        self.assertIn('1.2980837735881936:-0.5975424282106219', script)
+        self.assertNotIn('--optimize-scale', script)
 
     def test_browser_settings_reject_remote_commit_mismatch(self) -> None:
         branch = "codex/progress8ek-rescored-teacher-operations"

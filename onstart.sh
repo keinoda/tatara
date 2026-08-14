@@ -100,9 +100,9 @@ clang_version=${clang_version_output%%$'\n'*}
 
 gpu_lines=$(nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader)
 gpu_count=$(printf '%s\n' "$gpu_lines" | awk 'NF {n++} END {print n+0}')
-(( gpu_count == 1 )) || fail "GPUはRTX 5090 1枚である必要があります: count=$gpu_count"
+(( gpu_count == 1 )) || fail "GPUはRTX 5070 1枚である必要があります: count=$gpu_count"
 gpu_name=$(printf '%s\n' "$gpu_lines" | cut -d, -f1)
-[[ "$gpu_name" == *"RTX 5090"* ]] || fail "GPUがRTX 5090ではありません: $gpu_lines"
+[[ "$gpu_name" == *"RTX 5070"* ]] || fail "GPUがRTX 5070ではありません: $gpu_lines"
 
 cpu_model=$(lscpu | awk -F: '$1 ~ /^Model name/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}')
 [[ "$cpu_model" == *"AMD Ryzen 9 9950X"* ]] \
@@ -110,9 +110,9 @@ cpu_model=$(lscpu | awk -F: '$1 ~ /^Model name/ {sub(/^[[:space:]]+/, "", $2); p
 available_cpus=$(nproc)
 (( available_cpus >= 16 )) \
   || fail "学習threads 16に必要なCPUが割り当てられていません: nproc=$available_cpus"
-awk -v target="$WORKSPACE_ROOT" '$2 == target {found=1} END {exit !found}' /proc/mounts \
-  || fail "$WORKSPACE_ROOTが独立volumeのmount pointではありません"
-workspace_mount_target="$WORKSPACE_ROOT"
+workspace_mount_target=$(df -P "$WORKSPACE_ROOT" | awk 'NR == 2 {print $6}')
+[[ -n "$workspace_mount_target" ]] \
+  || fail "/workspaceを収容するfilesystemのmount targetを取得できませんでした"
 read -r workspace_total_bytes workspace_available_bytes < <(
   df -PB1 "$WORKSPACE_ROOT" | awk 'NR == 2 {print $2, $4}'
 )
@@ -210,8 +210,9 @@ target/release/nnue-train layerstack --help | grep -F 'progress8kpabs'
 target/release/nnue-train layerstack --help | grep -F 'progress8ek'
 target/release/net_to_yo --help | grep -F 'assume-progress8ek'
 target/release/progress8ek-filter --help >/dev/null
+target/release/progress8ek-partition --help >/dev/null
 sha256sum "$kernel_dir/nnue_train.ll" "$kernel_dir/nnue_train.ptx" target/release/nnue-train \
-  target/release/net_to_yo target/release/progress8ek-filter
+  target/release/net_to_yo target/release/progress8ek-filter target/release/progress8ek-partition
 JOB
 start_job build_tatara "$build_tatara_body"
 
