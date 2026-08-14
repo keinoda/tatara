@@ -23,6 +23,10 @@ path = "src/verify_network.rs"
 name = "progress8ek-partition"
 path = "src/partition.rs"
 
+[[bin]]
+name = "progress8ek-audit-psv"
+path = "src/audit_psv.rs"
+
 [dependencies]
 clap = { workspace = true }
 serde = { version = "1", features = ["derive"] }
