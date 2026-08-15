@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -139,6 +140,78 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         self.assertIn('"$PREPARED_DATA_MANIFEST"', script)
         self.assertIn('wcsc36-ordinary-valid76-affine', script)
         self.assertNotIn('--optimize-scale', script)
+
+    def test_base_training_command_matches_requested_settings(self) -> None:
+        printer = SCRIPT_DIR / "print-base-training-command.sh"
+        subprocess.run(["bash", "-n", str(printer)], check=True)
+        progress = "/approved/progress.bin"
+        output = "/runs/nagisa-v5-base/checkpoints"
+        printed = subprocess.run(
+            [str(printer), progress, output],
+            check=True,
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+        ).stdout
+        command = shlex.split(printed)
+        self.assertEqual(
+            command,
+            [
+                str(REPO_ROOT / "target/release/nnue-train"),
+                "--win-rate-model",
+                "--batch-size",
+                "65536",
+                "--batches-per-superbatch",
+                "10943",
+                "--superbatches",
+                "800",
+                "--lr",
+                "8.75e-4",
+                "--lr-gamma",
+                "0.995",
+                "--lr-step",
+                "1",
+                "--weight-decay",
+                "0.0",
+                "--wdl",
+                "0.0",
+                "--scale",
+                "290",
+                "--save-rate",
+                "100",
+                "--threads",
+                "16",
+                "--all-optim",
+                "--output",
+                output,
+                "--net-id",
+                "nagisa-v5",
+                "--data",
+                str(REPO_ROOT / "data/training/ordinary-valid76.psv"),
+                "layerstack",
+                "--ft-out",
+                "2304",
+                "--l1",
+                "16",
+                "--l2",
+                "64",
+                "--bucket-mode",
+                "progress8kpabs",
+                "--num-buckets",
+                "8",
+                "--progress-coeff",
+                progress,
+            ],
+        )
+        self.assertNotIn("--lr-schedule", command)
+        self.assertNotIn("--optimizer", command)
+        self.assertNotIn("--test-data", command)
+
+        presented = 65_536 * 10_943 * 800
+        epochs = presented / 14_342_411_752
+        self.assertEqual(presented, 573_728_358_400)
+        self.assertGreaterEqual(epochs, 40.0)
+        self.assertLess(epochs, 40.01)
 
     def test_browser_settings_reject_remote_commit_mismatch(self) -> None:
         branch = "codex/progress8ek-rescored-teacher-operations"

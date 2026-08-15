@@ -32,12 +32,19 @@ readonly ENTERING_ACTIVE_AUDIT="$DATA_VALIDITY_AUDIT_DIR/entering-active-audit.j
 readonly PARTITION_DATA_MANIFEST="$MANIFEST_DIR/prepared-data.txt"
 readonly PREPARED_DATA_MANIFEST="$MANIFEST_DIR/prepared-data-valid76.txt"
 readonly PROGRESS_SURVEY="$EXPERIMENT_ROOT/target/release/progress-bucket-survey"
+readonly NNUE_TRAIN="$EXPERIMENT_ROOT/target/release/nnue-train"
 readonly BASELINE_PROGRESS="$EXPERIMENT_ROOT/progress/baseline/progress.bin"
 readonly BASELINE_PROGRESS_SHA256="d77f47e874558d42fa2d87d173de3aba054eef51bcca9c1fc9f3a8daf93630d8"
 readonly PROGRESS_EXPECTED_BYTES=1003104
 readonly PSV_RECORD_BYTES=40
 readonly SOURCE_EXPECTED_BYTES=586757977480
 readonly SOURCE_EXPECTED_RECORDS=14668949437
+readonly BASE_TRAIN_POSITIONS=14342411752
+readonly BASE_BATCH_SIZE=65536
+readonly BASE_BATCHES_PER_SUPERBATCH=10943
+readonly BASE_SUPERBATCHES=800
+readonly BASE_PRESENTED_POSITIONS=573728358400
+readonly BASE_TARGET_EPOCHS=40
 readonly CONTAINER_IMAGE="ghcr.io/keinoda/shogi-lab:cuda129-trt1011"
 readonly CONTAINER_IMAGE_DIGEST="sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876"
 
@@ -96,4 +103,55 @@ run_name_for_phase() {
 require_training_phase() {
   [[ -n "${TRAINING_PHASE:-}" ]] || fail "TRAINING_PHASEをbaseまたはbucket8で明示してください"
   run_name_for_phase "$TRAINING_PHASE"
+}
+
+# 1 SBあたりの整数batch数が40 epochを下回らない最小値であることを確認する。
+require_base_training_volume() {
+  local target_positions previous_presented_positions
+  target_positions=$((BASE_TRAIN_POSITIONS * BASE_TARGET_EPOCHS))
+  previous_presented_positions=$((
+    BASE_BATCH_SIZE * (BASE_BATCHES_PER_SUPERBATCH - 1) * BASE_SUPERBATCHES
+  ))
+  [[ "$BASE_PRESENTED_POSITIONS" == "$((
+    BASE_BATCH_SIZE * BASE_BATCHES_PER_SUPERBATCH * BASE_SUPERBATCHES
+  ))" ]] || fail "通常学習の提示局面数が固定値と一致しません"
+  (( BASE_PRESENTED_POSITIONS >= target_positions )) \
+    || fail "通常学習の提示局面数が40 epochを下回ります"
+  (( previous_presented_positions < target_positions )) \
+    || fail "通常学習のbatches/SBが40 epochを満たす最小値ではありません"
+}
+
+# 通常学習の固定CLIを組み立てる。progressだけは承認済みfileを呼び出し側が渡す。
+build_base_training_command() {
+  local progress_bin="$1"
+  local output_dir="${2:-$RUNS_ROOT/$(run_name_for_phase base)/checkpoints}"
+  [[ -n "$progress_bin" ]] || fail "承認済みprogress.binのpathを指定してください"
+  require_base_training_volume
+
+  BASE_TRAINING_COMMAND=(
+    "$NNUE_TRAIN"
+    --win-rate-model
+    --batch-size "$BASE_BATCH_SIZE"
+    --batches-per-superbatch "$BASE_BATCHES_PER_SUPERBATCH"
+    --superbatches "$BASE_SUPERBATCHES"
+    --lr 8.75e-4
+    --lr-gamma 0.995
+    --lr-step 1
+    --weight-decay 0.0
+    --wdl 0.0
+    --scale 290
+    --save-rate 100
+    --threads 16
+    --all-optim
+    --output "$output_dir"
+    --net-id "$NET_ID"
+    --data "$ORDINARY_PSV"
+    layerstack
+    --ft-out 2304
+    --l1 16
+    --l2 64
+    --bucket-mode progress8kpabs
+    --num-buckets 8
+    --progress-coeff "$progress_bin"
+  )
 }
