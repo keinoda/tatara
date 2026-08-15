@@ -23,6 +23,20 @@ readonly TRAINING_DATA_DIR="$EXPERIMENT_ROOT/data/training"
 readonly PARTITION_ORDINARY_PSV="$TRAINING_DATA_DIR/ordinary.psv"
 readonly ORDINARY_PSV="$TRAINING_DATA_DIR/ordinary-valid76.psv"
 readonly ENTERING_KING_PSV="$TRAINING_DATA_DIR/entering-king.psv"
+readonly VALIDATION_DATASET="takaoyamaoka/floodgate.hcpe"
+readonly VALIDATION_DATASET_REVISION="fdd5f602db82d888a87116f087d10dd5ea8313ab"
+readonly VALIDATION_DIR="$EXPERIMENT_ROOT/data/validation"
+readonly VALIDATION_HCPE="$VALIDATION_DIR/floodgate.hcpe"
+readonly VALIDATION_PSV="$VALIDATION_DIR/floodgate.psv"
+readonly VALIDATION_HCPE_BYTES=32563074
+readonly VALIDATION_HCPE_SHA256="fb9d60b283ade32cb5c5715fe27042476bc7169cc46b6d62a2d85975c1a945ac"
+readonly VALIDATION_PSV_BYTES=34276920
+readonly VALIDATION_PSV_SHA256="22e11b82fa4ac7d75e82806480b5bfdd7ba29d773bcfb91ed5b3dfe7a43d66b8"
+readonly VALIDATION_FILE_POSITIONS=856923
+readonly VALIDATION_EFFECTIVE_POSITIONS=851968
+readonly RSHOGI_REPO="https://github.com/SH11235/rshogi.git"
+readonly RSHOGI_COMMIT="29245a1d8e4f198aba3fc832a506649221cb2f2c"
+readonly RSHOGI_DIR="$EXPERIMENT_ROOT/.runtime/rshogi"
 readonly PARTITION_METRICS="$TRAINING_DATA_DIR/metrics.json"
 readonly PARTITION_BIN="$EXPERIMENT_ROOT/target/release/progress8ek-partition"
 readonly ACTIVE_AUDIT_BIN="$EXPERIMENT_ROOT/target/release/progress8ek-audit-psv"
@@ -43,8 +57,10 @@ readonly BASE_TRAIN_POSITIONS=14342411752
 readonly BASE_BATCH_SIZE=65536
 readonly BASE_BATCHES_PER_SUPERBATCH=10943
 readonly BASE_SUPERBATCHES=800
+readonly BASE_SAVE_RATE=100
 readonly BASE_PRESENTED_POSITIONS=573728358400
 readonly BASE_TARGET_EPOCHS=40
+readonly MONITOR_MILESTONE_INTERVAL=100
 readonly CONTAINER_IMAGE="ghcr.io/keinoda/shogi-lab:cuda129-trt1011"
 readonly CONTAINER_IMAGE_DIGEST="sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876"
 
@@ -140,12 +156,14 @@ build_base_training_command() {
     --weight-decay 0.0
     --wdl 0.0
     --scale 290
-    --save-rate 100
+    --save-rate "$BASE_SAVE_RATE"
     --threads 16
     --all-optim
     --output "$output_dir"
     --net-id "$NET_ID"
     --data "$ORDINARY_PSV"
+    --test-data "$VALIDATION_PSV"
+    --test-positions "$VALIDATION_EFFECTIVE_POSITIONS"
     layerstack
     --ft-out 2304
     --l1 16

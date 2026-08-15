@@ -32,10 +32,12 @@ fi
 
 mkdir -p "$OUTPUT_DIR" "$GATE_DIR" "$EXPERIMENT_ROOT/logs/monitor"
 python3 "$MONITOR_IMPLEMENTATION_DIR/monitor.py" \
-  --run-name "$RUN_NAME" --run-root "$RUN_ROOT" --output-dir "$OUTPUT_DIR" --once
+  --run-name "$RUN_NAME" --run-root "$RUN_ROOT" --output-dir "$OUTPUT_DIR" \
+  --milestone-interval "$MONITOR_MILESTONE_INTERVAL" --once
 
-printf -v render_command 'exec python3 %q --run-name %q --run-root %q --output-dir %q >>%q 2>&1' \
+printf -v render_command 'exec python3 %q --run-name %q --run-root %q --output-dir %q --milestone-interval %q >>%q 2>&1' \
   "$MONITOR_IMPLEMENTATION_DIR/monitor.py" "$RUN_NAME" "$RUN_ROOT" "$OUTPUT_DIR" \
+  "$MONITOR_MILESTONE_INTERVAL" \
   "$EXPERIMENT_ROOT/logs/monitor/render-$RUN_NAME.log"
 printf -v http_command 'exec python3 %q --root %q --bind 0.0.0.0 --port %q >>%q 2>&1' \
   "$MONITOR_IMPLEMENTATION_DIR/monitor_server.py" "$OUTPUT_DIR" "$MONITOR_PORT" \

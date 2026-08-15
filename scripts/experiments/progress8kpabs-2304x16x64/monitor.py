@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import html
 import json
 import math
@@ -53,6 +54,72 @@ def finite_number(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def next_milestone_estimate(
+    experiment: dict[str, Any] | None,
+    history: list[dict[str, Any]],
+    *,
+    milestone_interval: int,
+    experiment_age_seconds: float | None,
+    trainer_alive: bool,
+    now: float,
+) -> dict[str, Any] | None:
+    if milestone_interval <= 0 or experiment is None:
+        return None
+
+    params = experiment.get("params") or {}
+    total_value = finite_number(params.get("superbatches"))
+    if total_value is None or total_value < 1:
+        return None
+    total_superbatches = int(total_value)
+
+    valid_history = [
+        item for item in history if finite_number(item.get("superbatch")) is not None
+    ]
+    if valid_history:
+        current_superbatch = int(finite_number(valid_history[-1]["superbatch"]) or 0)
+    else:
+        start_value = finite_number(params.get("start_superbatch"))
+        current_superbatch = max(0, int(start_value or 1) - 1)
+
+    if current_superbatch >= total_superbatches or experiment.get("status") == "completed":
+        return None
+    target_superbatch = min(
+        ((current_superbatch // milestone_interval) + 1) * milestone_interval,
+        total_superbatches,
+    )
+    remaining_superbatches = target_superbatch - current_superbatch
+
+    result: dict[str, Any] = {
+        "interval_superbatches": milestone_interval,
+        "target_superbatch": target_superbatch,
+        "remaining_superbatches": remaining_superbatches,
+        "estimated_seconds_remaining": None,
+        "estimated_at_utc": None,
+        "seconds_per_superbatch": None,
+        "basis_completed_superbatches": len(valid_history),
+    }
+    elapsed = finite_number(
+        (experiment.get("results") or {}).get("training_time_seconds")
+    )
+    if elapsed is None or elapsed <= 0 or not valid_history:
+        return result
+
+    seconds_per_superbatch = elapsed / len(valid_history)
+    partial_elapsed = 0.0
+    if trainer_alive and experiment_age_seconds is not None:
+        partial_elapsed = max(0.0, experiment_age_seconds)
+    remaining_seconds = max(
+        0.0,
+        remaining_superbatches * seconds_per_superbatch - partial_elapsed,
+    )
+    result["estimated_seconds_remaining"] = round(remaining_seconds)
+    result["estimated_at_utc"] = datetime.fromtimestamp(
+        now + remaining_seconds, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result["seconds_per_superbatch"] = round(seconds_per_superbatch, 3)
+    return result
 
 
 def history_points(history: list[dict[str, Any]], key: str) -> list[tuple[float, float]]:
@@ -226,7 +293,12 @@ def render_line_chart(
     )
 
 
-def build_status(run_name: str, run_root: Path, stale_seconds: int) -> dict[str, Any]:
+def build_status(
+    run_name: str,
+    run_root: Path,
+    stale_seconds: int,
+    milestone_interval: int = 0,
+) -> dict[str, Any]:
     now = time.time()
     experiment_path, experiment, read_error = newest_experiment(run_root)
     experiment_age = None
@@ -243,6 +315,14 @@ def build_status(run_name: str, run_root: Path, stale_seconds: int) -> dict[str,
 
     history = experiment.get("history", []) if experiment else []
     latest = history[-1] if history else None
+    next_milestone = next_milestone_estimate(
+        experiment,
+        history,
+        milestone_interval=milestone_interval,
+        experiment_age_seconds=experiment_age,
+        trainer_alive=trainer_alive,
+        now=now,
+    )
     return {
         "schema_version": 1,
         "generated_at_epoch": now,
@@ -261,6 +341,7 @@ def build_status(run_name: str, run_root: Path, stale_seconds: int) -> dict[str,
         "latest": latest,
         "results": experiment.get("results") if experiment else None,
         "checkpoints": experiment.get("checkpoints", []) if experiment else [],
+        "next_milestone": next_milestone,
     }
 
 
@@ -270,6 +351,19 @@ def render_html(status: dict[str, Any]) -> str:
 
     latest = status.get("latest") or {}
     results = status.get("results") or {}
+    milestone = status.get("next_milestone") or {}
+
+    def duration(value: Any) -> str | None:
+        seconds_value = finite_number(value)
+        if seconds_value is None:
+            return None
+        seconds = max(0, round(seconds_value))
+        days, remainder = divmod(seconds, 86_400)
+        hours, remainder = divmod(remainder, 3_600)
+        minutes, seconds = divmod(remainder, 60)
+        clock = f"{hours:02}:{minutes:02}:{seconds:02}"
+        return f"{days}日 {clock}" if days else clock
+
     rows = [
         ("run", status.get("run_name")),
         ("status", status.get("status")),
@@ -282,10 +376,30 @@ def render_html(status: dict[str, Any]) -> str:
         ("positions/s", results.get("mean_pos_per_sec")),
         ("best test loss", results.get("best_test_loss")),
         ("best test SB", results.get("best_test_loss_superbatch")),
-        ("commit", status.get("commit")),
-        ("experiment age (s)", status.get("experiment_age_seconds")),
-        ("exit code", status.get("trainer_exit_code")),
     ]
+    if milestone:
+        milestone_interval = milestone["interval_superbatches"]
+        rows.extend(
+            [
+                (
+                    f"next {milestone_interval} SB boundary",
+                    milestone.get("target_superbatch"),
+                ),
+                ("SB to boundary", milestone.get("remaining_superbatches")),
+                (
+                    "EST remaining",
+                    duration(milestone.get("estimated_seconds_remaining")),
+                ),
+                ("EST (UTC)", milestone.get("estimated_at_utc")),
+            ]
+        )
+    rows.extend(
+        [
+            ("commit", status.get("commit")),
+            ("experiment age (s)", status.get("experiment_age_seconds")),
+            ("exit code", status.get("trainer_exit_code")),
+        ]
+    )
     table = "\n".join(f"<tr><th>{html.escape(label)}</th><td>{esc(value)}</td></tr>" for label, value in rows)
     history = status.get("history") or []
     loss_chart = render_line_chart(
@@ -337,8 +451,14 @@ display:grid;place-items:center}}.warn{{color:#b91c1c;font-weight:700}}a{{color:
 <p><a href=\"/status.json\">status.json</a></p></main></body></html>\n"""
 
 
-def render_once(run_name: str, run_root: Path, output_dir: Path, stale_seconds: int) -> None:
-    status = build_status(run_name, run_root, stale_seconds)
+def render_once(
+    run_name: str,
+    run_root: Path,
+    output_dir: Path,
+    stale_seconds: int,
+    milestone_interval: int = 0,
+) -> None:
+    status = build_status(run_name, run_root, stale_seconds, milestone_interval)
     atomic_write(output_dir / "status.json", json.dumps(status, ensure_ascii=False, indent=2) + "\n")
     atomic_write(output_dir / "index.html", render_html(status))
 
@@ -350,12 +470,22 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--interval", type=int, default=15)
     parser.add_argument("--stale-seconds", type=int, default=180)
+    parser.add_argument("--milestone-interval", type=int, default=0)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    if args.interval < 1 or args.stale_seconds < 1:
-        parser.error("--interval and --stale-seconds must be >= 1")
+    if args.interval < 1 or args.stale_seconds < 1 or args.milestone_interval < 0:
+        parser.error(
+            "--interval and --stale-seconds must be >= 1; "
+            "--milestone-interval must be >= 0"
+        )
     while True:
-        render_once(args.run_name, args.run_root, args.output_dir, args.stale_seconds)
+        render_once(
+            args.run_name,
+            args.run_root,
+            args.output_dir,
+            args.stale_seconds,
+            args.milestone_interval,
+        )
         if args.once:
             return
         time.sleep(args.interval)

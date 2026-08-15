@@ -461,6 +461,7 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                     {
                         "status": "running",
                         "commit": "a" * 40,
+                        "params": {"superbatches": 800, "start_superbatch": 1},
                         "history": [
                             {
                                 "superbatch": 1,
@@ -476,6 +477,7 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                             }
                         ],
                         "results": {
+                            "training_time_seconds": 200,
                             "mean_pos_per_sec": 1234,
                             "best_test_loss": 0.13,
                             "best_test_loss_superbatch": 2,
@@ -486,13 +488,21 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
                 encoding="utf-8",
             )
             output = root / "monitor"
-            monitor.render_once("run-a", run_root, output, 180)
+            monitor.render_once("run-a", run_root, output, 180, 100)
             status = json.loads((output / "status.json").read_text(encoding="utf-8"))
             html = (output / "index.html").read_text(encoding="utf-8")
             self.assertEqual(status["latest"]["superbatch"], 2)
             self.assertEqual(len(status["history"]), 2)
             self.assertEqual(status["results"]["best_test_loss"], 0.13)
+            self.assertEqual(status["next_milestone"]["target_superbatch"], 100)
+            self.assertEqual(status["next_milestone"]["remaining_superbatches"], 98)
+            self.assertEqual(
+                status["next_milestone"]["estimated_seconds_remaining"], 9800
+            )
             self.assertIn("run-a", html)
+            self.assertIn("next 100 SB boundary", html)
+            self.assertIn("EST remaining", html)
+            self.assertIn("EST (UTC)", html)
             self.assertIn('data-chart="loss"', html)
             self.assertIn('data-chart="test-accuracy"', html)
             self.assertIn("train loss", html)
@@ -510,6 +520,28 @@ printf 'sample-plan\n' >"$output_dir/sample-plan.bin"
             self.assertIn("0.129", loss_chart)
             self.assertNotIn("<script", html)
             self.assertNotIn("MONITOR_PASSWORD", html)
+
+    def test_monitor_live_estimate_subtracts_current_partial_superbatch(self) -> None:
+        monitor = load_module("tatara_monitor_estimate", SCRIPT_DIR / "monitor.py")
+        estimate = monitor.next_milestone_estimate(
+            {
+                "status": "running",
+                "params": {"superbatches": 800, "start_superbatch": 1},
+                "results": {"training_time_seconds": 200},
+            },
+            [{"superbatch": 1}, {"superbatch": 2}],
+            milestone_interval=100,
+            experiment_age_seconds=20,
+            trainer_alive=True,
+            now=1_800_000_000,
+        )
+        self.assertIsNotNone(estimate)
+        assert estimate is not None
+        self.assertEqual(estimate["target_superbatch"], 100)
+        self.assertEqual(estimate["remaining_superbatches"], 98)
+        self.assertEqual(estimate["seconds_per_superbatch"], 100.0)
+        self.assertEqual(estimate["estimated_seconds_remaining"], 9780)
+        self.assertEqual(estimate["basis_completed_superbatches"], 2)
 
     def test_monitor_chart_ignores_non_finite_values(self) -> None:
         monitor = load_module("tatara_monitor_non_finite", SCRIPT_DIR / "monitor.py")

@@ -188,6 +188,10 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
                 "nagisa-v5",
                 "--data",
                 str(REPO_ROOT / "data/training/ordinary-valid76.psv"),
+                "--test-data",
+                str(REPO_ROOT / "data/validation/floodgate.psv"),
+                "--test-positions",
+                "851968",
                 "layerstack",
                 "--ft-out",
                 "2304",
@@ -205,7 +209,6 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         )
         self.assertNotIn("--lr-schedule", command)
         self.assertNotIn("--optimizer", command)
-        self.assertNotIn("--test-data", command)
 
         presented = 65_536 * 10_943 * 800
         epochs = presented / 14_342_411_752
@@ -262,7 +265,34 @@ printf '%s\\n' "$(run_name_for_phase base)" "$(run_name_for_phase bucket8)"
         self.assertIn("--bind 0.0.0.0 --port %q", monitor)
         self.assertIn("unauth_status", monitor)
         self.assertIn('"$MONITOR_PUBLIC_URL/status.json"', monitor)
+        self.assertIn(
+            '--milestone-interval "$MONITOR_MILESTONE_INTERVAL"', monitor
+        )
         self.assertNotIn("seq 1 30", monitor)
+
+    def test_floodgate_validation_reuses_pinned_yamaoka_dataset(self) -> None:
+        script = SCRIPT_DIR / "run-prepare-floodgate-validation.sh"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        lib = (SCRIPT_DIR / "lib.sh").read_text(encoding="utf-8")
+        preparation = script.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'readonly VALIDATION_DATASET="takaoyamaoka/floodgate.hcpe"', lib
+        )
+        self.assertIn(
+            'readonly VALIDATION_DATASET_REVISION="fdd5f602db82d888a87116f087d10dd5ea8313ab"',
+            lib,
+        )
+        self.assertIn("readonly VALIDATION_FILE_POSITIONS=856923", lib)
+        self.assertIn("readonly VALIDATION_EFFECTIVE_POSITIONS=851968", lib)
+        self.assertIn(
+            'readonly VALIDATION_PSV_SHA256="22e11b82fa4ac7d75e82806480b5bfdd7ba29d773bcfb91ed5b3dfe7a43d66b8"',
+            lib,
+        )
+        self.assertIn("readonly MONITOR_MILESTONE_INTERVAL=100", lib)
+        self.assertIn('hf download "$VALIDATION_DATASET"', preparation)
+        self.assertIn('checkout --detach "$RSHOGI_COMMIT"', preparation)
+        self.assertIn("--bin hcpe_to_psv", preparation)
 
 
 if __name__ == "__main__":
