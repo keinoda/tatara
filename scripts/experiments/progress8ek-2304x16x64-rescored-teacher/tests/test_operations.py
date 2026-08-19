@@ -340,6 +340,8 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         self.assertIn("--assume-progress8ek", smoke)
         self.assertIn("shared_parameters_bit_identical", smoke)
         self.assertIn("slots_0_through_7_bit_identical", smoke)
+        self.assertIn("slot8_has_difference_from_source_slot", smoke)
+        self.assertNotIn("slot8_has_difference_from_base_slot7", smoke)
         self.assertIn("require_no_trainer_process", smoke)
         self.assertIn('"$CUDA_GATE_DIR/done"', smoke)
 

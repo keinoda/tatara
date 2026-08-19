@@ -70,7 +70,7 @@ report = json.load(open(sys.argv[1], encoding="utf-8"))
 required = {
     "shared_parameters_bit_identical": True,
     "slots_0_through_7_bit_identical": True,
-    "slot8_has_difference_from_base_slot7": True,
+    "slot8_has_difference_from_source_slot": True,
 }
 for key, expected in required.items():
     if report.get(key) is not expected:

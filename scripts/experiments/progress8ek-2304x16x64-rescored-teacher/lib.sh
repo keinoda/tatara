@@ -291,15 +291,16 @@ build_bucket8_training_command() {
     --lr 8.75e-4 --lr-gamma 0.995 --lr-step 1
 }
 
-# preflight smoke用command。1 SB・2 batchだけ学習し、小さな定数LRで非対象parameterの
-# 不変性とslot 8の更新を検査する。データ範囲・routing・flagはproductionと同じにする。
+# preflight smoke用command。1 SB・2 batchだけ学習し、productionの初期LRを定数で使って
+# 非対象parameterの不変性と量子化後のslot 8の更新を検査する。データ範囲・routing・
+# flagはproductionと同じにする。
 build_bucket8_smoke_command() {
   local base_network="$1" progress_bin="$2" output_dir="$3"
   require_bucket8_training_volume
   build_bucket8_command_core \
     "$base_network" "$progress_bin" "$output_dir" "$BUCKET8_SMOKE_NET_ID" \
     1 2 1 "$BUCKET8_BATCH_SIZE" \
-    --lr 3.5e-5 --lr-schedule constant
+    --lr 8.75e-4 --lr-schedule constant
 }
 
 require_file_sha256() {
