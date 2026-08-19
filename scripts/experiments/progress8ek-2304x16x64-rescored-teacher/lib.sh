@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 再評価教師progress8ek学習のVast.ai準備とmonitorで共有する定数・検証関数。
+# 再評価教師progress8ek学習のVast.ai準備、monitor、slot 8追加学習で共有する定数・検証関数。
 
 set -Eeuo pipefail
 
@@ -63,6 +63,29 @@ readonly BASE_TARGET_EPOCHS=40
 readonly MONITOR_MILESTONE_INTERVAL=100
 readonly CONTAINER_IMAGE="ghcr.io/keinoda/shogi-lab:cuda129-trt1011"
 readonly CONTAINER_IMAGE_DIGEST="sha256:f84acfc2e3b147f5dacaf473061723ea5662eb2bddc648f3283ab2b7cd63b876"
+# slot 8（相入玉専用の第9 LayerStack）追加学習の固定値。
+# base networkは通常学習の最終量子化networkで、既定は線形減衰tail runの最終SB。
+readonly BASE_FINAL_RUN_NAME="$NET_ID-converge-sb500"
+readonly BASE_FINAL_NETWORK_DEFAULT="$RUNS_ROOT/$BASE_FINAL_RUN_NAME/checkpoints/$NET_ID-600.bin"
+readonly APPROVED_PROGRESS_SHA256="be0238267e9373bd318cb4fef119aabaf27b1468a6cda75c25f43fe67711bc81"
+readonly ENTERING_KING_EXPECTED_BYTES=13061246280
+readonly ENTERING_KING_SHA256="f7594e104c83e0e6d59a29ef00823f959e0f58412b5d4a8d5315fd4c3e3fd28f"
+readonly VERIFY_NETWORK_BIN="$EXPERIMENT_ROOT/target/release/progress8ek-verify-network"
+readonly NET_TO_YO="$EXPERIMENT_ROOT/target/release/net_to_yo"
+readonly BUCKET8_SOURCE_SLOT=7
+readonly BUCKET8_FILE_POSITIONS=326531157
+# entering-king.psv末尾を同一file内のheld-out検証に予約する局面数（65,536の倍数）。
+# 0を指定すると検証flagを付けず全件を学習に使う。
+readonly BUCKET8_VALIDATION_TAIL_POSITIONS="${BUCKET8_VALIDATION_TAIL_POSITIONS:-851968}"
+readonly BUCKET8_BATCH_SIZE=65536
+readonly BUCKET8_BATCHES_PER_SUPERBATCH=250
+readonly BUCKET8_SUPERBATCHES=800
+readonly BUCKET8_SAVE_RATE=100
+readonly BUCKET8_WDL=0.33
+readonly BUCKET8_TARGET_EPOCHS=40
+readonly BUCKET8_PRESENTED_POSITIONS=13107200000
+readonly BUCKET8_TRAINER_SESSION="train-$NET_ID-bucket8"
+readonly BUCKET8_SMOKE_NET_ID="$NET_ID-bucket8-smoke"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -172,4 +195,128 @@ build_base_training_command() {
     --num-buckets 8
     --progress-coeff "$progress_bin"
   )
+}
+
+# slot 8追加学習の提示局面数が、相入玉教師全件に対して40 epoch以上となる最小の
+# 整数batches/SBであることを確認する。検証用に予約した末尾は学習から外れるため、
+# 実epochは全件基準の値を下回らない。
+require_bucket8_training_volume() {
+  local target_positions previous_presented_positions
+  target_positions=$((BUCKET8_FILE_POSITIONS * BUCKET8_TARGET_EPOCHS))
+  previous_presented_positions=$((
+    BUCKET8_BATCH_SIZE * (BUCKET8_BATCHES_PER_SUPERBATCH - 1) * BUCKET8_SUPERBATCHES
+  ))
+  [[ "$BUCKET8_PRESENTED_POSITIONS" == "$((
+    BUCKET8_BATCH_SIZE * BUCKET8_BATCHES_PER_SUPERBATCH * BUCKET8_SUPERBATCHES
+  ))" ]] || fail "slot 8追加学習の提示局面数が固定値と一致しません"
+  (( BUCKET8_PRESENTED_POSITIONS >= target_positions )) \
+    || fail "slot 8追加学習の提示局面数が40 epochを下回ります"
+  (( previous_presented_positions < target_positions )) \
+    || fail "slot 8追加学習のbatches/SBが40 epochを満たす最小値ではありません"
+  [[ "$BUCKET8_VALIDATION_TAIL_POSITIONS" =~ ^[0-9]+$ ]] \
+    || fail "BUCKET8_VALIDATION_TAIL_POSITIONSは0以上の整数にしてください"
+  (( BUCKET8_VALIDATION_TAIL_POSITIONS % BUCKET8_BATCH_SIZE == 0 )) \
+    || fail "BUCKET8_VALIDATION_TAIL_POSITIONSはbatch size $BUCKET8_BATCH_SIZE の倍数にしてください"
+  (( BUCKET8_VALIDATION_TAIL_POSITIONS < BUCKET8_FILE_POSITIONS )) \
+    || fail "BUCKET8_VALIDATION_TAIL_POSITIONSが相入玉教師件数以上です"
+}
+
+# 検証用末尾予約がある場合だけ、held-out flagをBUCKET8_TRAINING_COMMANDへ追加する。
+append_bucket8_validation_args() {
+  local test_positions="$1"
+  (( BUCKET8_VALIDATION_TAIL_POSITIONS > 0 )) || return 0
+  BUCKET8_TRAINING_COMMAND+=(
+    --test-tail-positions "$BUCKET8_VALIDATION_TAIL_POSITIONS"
+    --test-positions "$test_positions"
+  )
+}
+
+# slot 8追加学習のCLIを組み立てる。通常学習commandから変わるのは、base networkの
+# 初期化、相入玉教師、WDL、学習量、9-slot routing、slot限定更新flagだけである。
+# 呼び出し側は base network・承認済みprogress.binを渡し、smokeだけが学習量・LR・
+# 出力先を上書きする。
+#   $1 base network (8 bucket量子化.bin)  $2 承認済みprogress.bin
+#   $3 output directory  $4 net id  $5 superbatches  $6 batches/SB  $7 save rate
+#   $8 検証pass局面数  $9.. LR引数
+build_bucket8_command_core() {
+  local base_network="$1" progress_bin="$2" output_dir="$3" net_id="$4"
+  local superbatches="$5" batches_per_superbatch="$6" save_rate="$7"
+  local test_positions="$8"
+  shift 8
+  local lr_args=("$@")
+  [[ -n "$base_network" ]] || fail "base networkのpathを指定してください"
+  [[ -n "$progress_bin" ]] || fail "承認済みprogress.binのpathを指定してください"
+
+  BUCKET8_TRAINING_COMMAND=(
+    "$NNUE_TRAIN"
+    --init-from "$base_network"
+    --win-rate-model
+    --batch-size "$BUCKET8_BATCH_SIZE"
+    --batches-per-superbatch "$batches_per_superbatch"
+    --superbatches "$superbatches"
+    "${lr_args[@]}"
+    --weight-decay 0.0
+    --wdl "$BUCKET8_WDL"
+    --scale 290
+    --save-rate "$save_rate"
+    --threads 16
+    --all-optim
+    --output "$output_dir"
+    --net-id "$net_id"
+    --data "$ENTERING_KING_PSV"
+  )
+  append_bucket8_validation_args "$test_positions"
+  BUCKET8_TRAINING_COMMAND+=(
+    layerstack
+    --ft-out 2304
+    --l1 16
+    --l2 64
+    --bucket-mode progress8ek
+    --num-buckets 9
+    --progress-coeff "$progress_bin"
+    --progress8ek-finetune
+    --progress8ek-source-slot "$BUCKET8_SOURCE_SLOT"
+  )
+}
+
+# production用slot 8追加学習command。
+build_bucket8_training_command() {
+  local base_network="$1" progress_bin="$2"
+  local output_dir="${3:-$RUNS_ROOT/$(run_name_for_phase bucket8)/checkpoints}"
+  require_bucket8_training_volume
+  build_bucket8_command_core \
+    "$base_network" "$progress_bin" "$output_dir" "$NET_ID" \
+    "$BUCKET8_SUPERBATCHES" "$BUCKET8_BATCHES_PER_SUPERBATCH" "$BUCKET8_SAVE_RATE" \
+    "$BUCKET8_VALIDATION_TAIL_POSITIONS" \
+    --lr 8.75e-4 --lr-gamma 0.995 --lr-step 1
+}
+
+# preflight smoke用command。1 SB・2 batchだけ学習し、小さな定数LRで非対象parameterの
+# 不変性とslot 8の更新を検査する。データ範囲・routing・flagはproductionと同じにする。
+build_bucket8_smoke_command() {
+  local base_network="$1" progress_bin="$2" output_dir="$3"
+  require_bucket8_training_volume
+  build_bucket8_command_core \
+    "$base_network" "$progress_bin" "$output_dir" "$BUCKET8_SMOKE_NET_ID" \
+    1 2 1 "$BUCKET8_BATCH_SIZE" \
+    --lr 3.5e-5 --lr-schedule constant
+}
+
+require_file_sha256() {
+  local path="$1" expected="$2" label="$3" actual
+  [[ -f "$path" ]] || fail "$label がありません: $path"
+  actual=$(sha256_file "$path")
+  [[ "$actual" == "$expected" ]] \
+    || fail "$label のSHA-256が期待値と一致しません: $path ($actual != $expected)"
+}
+
+require_no_trainer_process() {
+  if pgrep -f "$NNUE_TRAIN" >/dev/null 2>&1; then
+    fail "nnue-trainが稼働中です。学習プロセスを確認してください"
+  fi
+}
+
+require_clean_experiment_checkout() {
+  [[ -z "$(git -C "$EXPERIMENT_ROOT" status --porcelain)" ]] \
+    || fail "Tatara checkoutに未保存の変更があります: $EXPERIMENT_ROOT"
 }

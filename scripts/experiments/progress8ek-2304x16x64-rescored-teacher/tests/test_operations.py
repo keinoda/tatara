@@ -216,6 +216,153 @@ printf '%s\\trefs/heads/{branch}\\n' '{remote}'
         self.assertGreaterEqual(epochs, 40.0)
         self.assertLess(epochs, 40.01)
 
+    def _bucket8_command(self, *, tail: int | None = None) -> list[str]:
+        printer = SCRIPT_DIR / "print-bucket8-training-command.sh"
+        subprocess.run(["bash", "-n", str(printer)], check=True)
+        environment = os.environ.copy()
+        if tail is not None:
+            environment["BUCKET8_VALIDATION_TAIL_POSITIONS"] = str(tail)
+        printed = subprocess.run(
+            [str(printer), "/base/nagisa-v5-600.bin", "/approved/progress.bin"],
+            check=True,
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            env=environment,
+        ).stdout
+        return shlex.split(printed)
+
+    def test_bucket8_training_command_matches_approved_settings(self) -> None:
+        command = self._bucket8_command()
+        self.assertEqual(
+            command,
+            [
+                str(REPO_ROOT / "target/release/nnue-train"),
+                "--init-from",
+                "/base/nagisa-v5-600.bin",
+                "--win-rate-model",
+                "--batch-size",
+                "65536",
+                "--batches-per-superbatch",
+                "250",
+                "--superbatches",
+                "800",
+                "--lr",
+                "8.75e-4",
+                "--lr-gamma",
+                "0.995",
+                "--lr-step",
+                "1",
+                "--weight-decay",
+                "0.0",
+                "--wdl",
+                "0.33",
+                "--scale",
+                "290",
+                "--save-rate",
+                "100",
+                "--threads",
+                "16",
+                "--all-optim",
+                "--output",
+                str(REPO_ROOT / "runs/nagisa-v5-bucket8/checkpoints"),
+                "--net-id",
+                "nagisa-v5",
+                "--data",
+                str(REPO_ROOT / "data/training/entering-king.psv"),
+                "--test-tail-positions",
+                "851968",
+                "--test-positions",
+                "851968",
+                "layerstack",
+                "--ft-out",
+                "2304",
+                "--l1",
+                "16",
+                "--l2",
+                "64",
+                "--bucket-mode",
+                "progress8ek",
+                "--num-buckets",
+                "9",
+                "--progress-coeff",
+                "/approved/progress.bin",
+                "--progress8ek-finetune",
+                "--progress8ek-source-slot",
+                "7",
+            ],
+        )
+        self.assertNotIn("--resume", command)
+        self.assertNotIn("--lr-schedule", command)
+        self.assertNotIn("--keep-checkpoints", command)
+        self.assertNotIn("--test-data", command)
+
+    def test_bucket8_training_command_without_validation_tail(self) -> None:
+        command = self._bucket8_command(tail=0)
+        self.assertNotIn("--test-tail-positions", command)
+        self.assertNotIn("--test-positions", command)
+        self.assertIn("--progress8ek-finetune", command)
+
+    def test_bucket8_volume_is_minimal_ceil_over_entering_king_file(self) -> None:
+        entering_king = 326_531_157
+        tail = 851_968
+        batch_size, batches, superbatches = 65_536, 250, 800
+        presented = batch_size * batches * superbatches
+        self.assertEqual(presented, 13_107_200_000)
+        self.assertGreaterEqual(presented, entering_king * 40)
+        self.assertLess(batch_size * (batches - 1) * superbatches, entering_king * 40)
+        self.assertEqual(tail % batch_size, 0)
+        self.assertAlmostEqual(presented / entering_king, 40.1407, places=4)
+        self.assertAlmostEqual(presented / (entering_king - tail), 40.2457, places=4)
+
+    def test_bucket8_gate_scripts_fail_closed(self) -> None:
+        scripts = {
+            name: (SCRIPT_DIR / name).read_text(encoding="utf-8")
+            for name in (
+                "run-bucket8-cuda-gate.sh",
+                "run-bucket8-preflight-smoke.sh",
+                "prepare-bucket8-run.sh",
+                "switch-monitor-to-bucket8.sh",
+                "start-bucket8-training.sh",
+            )
+        }
+        for name in scripts:
+            subprocess.run(["bash", "-n", str(SCRIPT_DIR / name)], check=True)
+
+        gate = scripts["run-bucket8-cuda-gate.sh"]
+        self.assertIn("progress8ek_finetune_updates_only_slot8", gate)
+        self.assertIn("既存CUDA gateを上書きしません", gate)
+
+        smoke = scripts["run-bucket8-preflight-smoke.sh"]
+        self.assertIn("build_bucket8_smoke_command", smoke)
+        self.assertIn("--require-slot8-difference", smoke)
+        self.assertIn("--ft-out 2304", smoke)
+        self.assertIn("--assume-progress8ek", smoke)
+        self.assertIn("shared_parameters_bit_identical", smoke)
+        self.assertIn("slots_0_through_7_bit_identical", smoke)
+        self.assertIn("require_no_trainer_process", smoke)
+        self.assertIn('"$CUDA_GATE_DIR/done"', smoke)
+
+        prepare = scripts["prepare-bucket8-run.sh"]
+        self.assertIn("FULL_CI_LOG", prepare)
+        self.assertIn('"$SMOKE_ROOT/done"', prepare)
+        self.assertIn('require_file_sha256 "$ENTERING_KING_PSV" "$ENTERING_KING_SHA256"', prepare)
+        self.assertIn("trainer_started=false", prepare)
+        self.assertIn("既存runを上書きしません", prepare)
+        self.assertNotIn("tmux new-session", prepare)
+
+        switch = scripts["switch-monitor-to-bucket8.sh"]
+        self.assertIn('"$previous_root/state/training.ended"', switch)
+        self.assertIn("TRAINING_PHASE=bucket8", switch)
+        self.assertNotIn("nnue-train --", switch)
+
+        start = scripts["start-bucket8-training.sh"]
+        self.assertIn('"$GATE_DIR/monitor.done"', start)
+        self.assertIn("query-compute-apps", start)
+        self.assertIn("command_sha256", start)
+        self.assertIn("base_network_sha256", start)
+        self.assertIn('tmux new-session -d -s "$BUCKET8_TRAINER_SESSION"', start)
+
     def test_browser_settings_reject_remote_commit_mismatch(self) -> None:
         branch = "codex/progress8ek-rescored-teacher-operations"
         with tempfile.TemporaryDirectory() as temporary:
